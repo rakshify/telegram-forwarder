@@ -1,0 +1,27 @@
+services:
+  forwarder:
+    build: .
+    image: telegram-forwarder:latest
+    container_name: telegram-forwarder
+    env_file: .env
+    volumes:
+      # Map host directory to container session dir so sessions survive container restarts.
+      - ./data/sessions:/data/sessions
+    stdin_open: true   # keep STDIN open for interactive login
+    tty: true          # allocate a TTY for OTP / 2FA prompts
+    restart: unless-stopped
+
+    # `command` controls what runs when you do `docker compose up`.
+    # Use `docker compose run --rm forwarder <subcommand>` for one-off operations:
+    #   docker compose run --rm forwarder login
+    #   docker compose run --rm forwarder list-groups
+    #   docker compose run --rm forwarder logout
+    #
+    # For long-running forwarding, override `command` with your chat IDs/hashes, e.g.:
+    #   command: >
+    #     forward
+    #     -gid -1001234567890 -1009876543210
+    #     -gh  1234567890     9876543210
+    #     -mid -1005555555555 -1006666666666
+    #     -mh  5555555555     6666666666
+    command: ["--help"]
