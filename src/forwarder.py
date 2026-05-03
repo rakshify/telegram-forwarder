@@ -48,8 +48,57 @@ class ChatPair:
     msg_id_map: Dict[int, int] = field(default_factory=dict)
 
 
+async def _resolve_peer(
+    client: TelegramClient,
+    chat_id: int,
+    access_hash: int,
+    role: str,
+    for_bot: bool,
+):
+    """Return a usable input-peer for `client`.
+
+    Telegram access_hashes are *per-account* — the hash returned by
+    `list-groups` is the user account's hash and is NOT valid for the bot.
+    So:
+
+      * source (user side): supergroups can be addressed directly by
+        InputPeerChannel(chat_id, hash_from_list_groups). For basic groups,
+        the user session needs to know the chat — so we get_entity it.
+      * dest (bot side): we *must* let the bot resolve the entity itself, so
+        the session gets the bot's own access_hash. This works uniformly for
+        supergroups, channels, and basic groups. The user-provided -mh value
+        is accepted by the CLI for symmetry with -gh but ignored at runtime.
+    """
+    if for_bot:
+        # Always resolve via the bot's own session so we get the bot's hash.
+        marked = -chat_id if access_hash == 0 else int(f"-100{chat_id}")
+        try:
+            return await client.get_entity(marked)
+        except Exception as e:
+            raise SystemExit(
+                f"Bot could not resolve {role} chat (id={chat_id}): {e}\n"
+                f"Make sure the bot is a member of that chat with permission to post."
+            )
+
+    # User side
+    if access_hash != 0:
+        return InputPeerChannel(channel_id=chat_id, access_hash=access_hash)
+
+    try:
+        return await client.get_entity(-chat_id)
+    except Exception as e:
+        raise SystemExit(
+            f"Could not resolve basic-group {role} chat_id={chat_id} on the user session: {e}\n"
+            f"Make sure your user account is a member of that group."
+        )
+
+
 def _build_peer(chat_id: int, access_hash: int):
-    """Pick the right input-peer type based on whether an access_hash was supplied."""
+    """Sync peer builder (kept for backward compatibility / direct use).
+
+    Prefer `_resolve_peer` from inside the running event loop, since it also
+    primes the session cache for basic groups.
+    """
     if access_hash == 0:
         return InputPeerChat(chat_id=chat_id)
     return InputPeerChannel(channel_id=chat_id, access_hash=access_hash)
@@ -98,10 +147,17 @@ async def forward_pairs(pairs: List[ChatPair]) -> None:
 
     await bot_client.start(bot_token=config.BOT_TOKEN)
 
-    # Build the right input-peer type for every endpoint (basic vs supergroup)
+    # Build the right input-peer type for every endpoint.
+    # See _resolve_peer for the per-account access_hash subtlety.
     for pair in pairs:
-        pair.source_peer = _build_peer(pair.source_id, pair.source_hash)
-        pair.dest_peer = _build_peer(pair.dest_id, pair.dest_hash)
+        pair.source_peer = await _resolve_peer(
+            user_client, pair.source_id, pair.source_hash,
+            role="source", for_bot=False,
+        )
+        pair.dest_peer = await _resolve_peer(
+            bot_client, pair.dest_id, pair.dest_hash,
+            role="dest", for_bot=True,
+        )
 
     # Register one handler per source chat, capturing the right pair
     for pair in pairs:
