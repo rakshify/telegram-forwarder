@@ -1,0 +1,16 @@
+{
+  "_comment_top": "Minimal example: one user, one plain supergroup -> supergroup.",
+  "_comment_user": "Replace with a short_id from `list-users`.",
+
+  "user": "REPLACE_WITH_SHORT_ID",
+
+  "pairs": [
+    {
+      "_comment": "Plain supergroup A -> supergroup B (no topics).",
+      "source": "-1001234567890",
+      "source_hash": 9876543210987654321,
+      "dest":   "-1006666666666",
+      "dest_hash": 0
+    }
+  ]
+}

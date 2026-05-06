@@ -43,11 +43,20 @@ class ChatPair:
     `source_hash` / `dest_hash` of 0 marks the corresponding chat as a basic
     (legacy) group, which uses InputPeerChat (no access_hash). Anything else
     is treated as a supergroup/channel and uses InputPeerChannel.
+
+    `topic_id` of 0 means "the whole supergroup, no topic filter". Any other
+    value filters source messages to that one topic of a forum supergroup.
+
+    `dest_topic_id` of 0 means "post in the destination's main feed". Any
+    other value posts inside that destination topic (the destination must be
+    a forum-enabled supergroup, and the topic must already exist).
     """
-    source_id: int          # bare id (no -100 / no leading minus)
-    source_hash: int        # access_hash, or 0 for basic groups
-    dest_id: int            # bare id (no -100 / no leading minus)
-    dest_hash: int          # access_hash, or 0 for basic groups
+    source_id: int
+    source_hash: int
+    dest_id: int
+    dest_hash: int
+    topic_id: int = 0
+    dest_topic_id: int = 0
     source_peer: Optional[object] = None
     dest_peer: Optional[object] = None
     msg_id_map: Dict[int, int] = field(default_factory=dict)
@@ -106,7 +115,8 @@ async def forward_pairs(short_id: str, pairs: List[ChatPair]) -> None:
     # Now register live handlers
     for pair in pairs:
         _register_handler(user_client, bot_client, pair, short_id, forward_state)
-        print(f"Registered: source={pair.source_id} -> dest={pair.dest_id}")
+        print(f"Registered: source={pair.source_id}{_topic_label(pair)} "
+              f"-> dest={pair.dest_id}")
 
     print("Listening. Press Ctrl+C to stop.")
     try:
@@ -177,42 +187,51 @@ async def _catchup(
     First-ever run for a pair: establish the baseline at the current latest
     message id (no full-history backfill — only catch up from this point on).
     """
-    skey = state.state_key(short_id, pair.source_id, pair.dest_id)
+    skey = state.state_key(short_id, pair.source_id, pair.dest_id, pair.topic_id)
     last_seen = forward_state.get(skey, 0)
 
+    # iter_messages takes reply_to=<topic_top_msg_id> to filter to one forum topic.
+    iter_kwargs = {"min_id": last_seen}
+    latest_kwargs = {"limit": 1}
+    if pair.topic_id:
+        iter_kwargs["reply_to"] = pair.topic_id
+        latest_kwargs["reply_to"] = pair.topic_id
+
     if last_seen == 0:
-        # Brand-new pair — anchor at "now" so we don't backfill the full history.
-        latest_msgs = await user_client.get_messages(pair.source_peer, limit=1)
+        latest_msgs = await user_client.get_messages(pair.source_peer, **latest_kwargs)
         baseline = latest_msgs[0].id if latest_msgs else 0
         forward_state[skey] = baseline
         state.save_state(forward_state)
-        print(f"[{pair.source_id} -> {pair.dest_id}] no prior state — "
-              f"baselined at message id {baseline}")
+        scope = f"topic {pair.topic_id}" if pair.topic_id else "whole chat"
+        print(f"[{pair.source_id}{_topic_label(pair)} -> {pair.dest_id}] "
+              f"no prior state ({scope}) — baselined at message id {baseline}")
         return
 
-    # Fetch every message with id > last_seen. iter_messages is newest-first
-    # by default; we collect and reverse to forward in chronological order.
     missed: List[Message] = []
-    async for m in user_client.iter_messages(pair.source_peer, min_id=last_seen):
+    async for m in user_client.iter_messages(pair.source_peer, **iter_kwargs):
         missed.append(m)
     missed.reverse()
 
     if not missed:
-        print(f"[{pair.source_id} -> {pair.dest_id}] no missed messages "
-              f"since id {last_seen}")
+        print(f"[{pair.source_id}{_topic_label(pair)} -> {pair.dest_id}] "
+              f"no missed messages since id {last_seen}")
         return
 
-    print(f"[{pair.source_id} -> {pair.dest_id}] catching up "
-          f"{len(missed)} missed message(s)")
+    print(f"[{pair.source_id}{_topic_label(pair)} -> {pair.dest_id}] "
+          f"catching up {len(missed)} missed message(s)")
     for m in missed:
         try:
             await _forward_one(bot_client, pair, m)
         except Exception as e:
             print(f"  catchup error on msg {m.id}: {e} — "
                   f"stopping catchup for this pair, will retry next run")
-            return  # Don't advance state past the failed message
+            return
         forward_state[skey] = m.id
         state.save_state(forward_state)
+
+
+def _topic_label(pair: ChatPair) -> str:
+    return f"#{pair.topic_id}" if pair.topic_id else ""
 
 
 # ------------------------------------------------------------------ live listener
@@ -224,12 +243,25 @@ def _register_handler(
     short_id: str,
     forward_state: Dict[str, int],
 ) -> None:
-    skey = state.state_key(short_id, pair.source_id, pair.dest_id)
+    skey = state.state_key(short_id, pair.source_id, pair.dest_id, pair.topic_id)
 
     @user_client.on(events.NewMessage(chats=pair.source_peer))
     async def handler(event: events.NewMessage.Event):
         msg = event.message
         try:
+            # Topic filter: a message belongs to topic T if its reply_to header
+            # has reply_to_top_id == T (replies inside the topic) OR
+            # reply_to_msg_id == T (the topic's own root message, or a direct
+            # reply to it). Messages in the General topic / non-forum chats
+            # have no reply_to header at all, which we treat as topic_id=0.
+            if pair.topic_id:
+                rt = msg.reply_to
+                if rt is None:
+                    return
+                top = getattr(rt, "reply_to_top_id", None) or rt.reply_to_msg_id
+                if top != pair.topic_id:
+                    return
+
             # Skip if catch-up already handled this id (overlap window between
             # catch-up finishing and the listener attaching).
             if msg.id <= forward_state.get(skey, 0):
@@ -239,7 +271,8 @@ def _register_handler(
             state.save_state(forward_state)
         except Exception as e:
             mid = getattr(msg, "id", "?")
-            print(f"[{pair.source_id} -> {pair.dest_id}] error on msg {mid}: {e}")
+            print(f"[{pair.source_id}{_topic_label(pair)} -> {pair.dest_id}] "
+                  f"error on msg {mid}: {e}")
 
 
 # ------------------------------------------------------------------ the actual send
@@ -249,10 +282,17 @@ async def _forward_one(
 ) -> None:
     """Re-send `msg` into `pair.dest_peer` via the bot, preserving as much as we can."""
 
-    # Resolve reply target via the per-pair id map
+    # Resolve reply target. Order of preference:
+    #   1) If the source message is a reply and we've forwarded the parent
+    #      before, link to the corresponding destination message id.
+    #   2) Otherwise, if a destination topic is configured, use that topic's
+    #      top-message id so the message lands inside that topic.
+    #   3) Otherwise None — message goes to the destination's main feed.
     reply_to: Optional[int] = None
     if msg.reply_to_msg_id:
         reply_to = pair.msg_id_map.get(msg.reply_to_msg_id)
+    if reply_to is None and pair.dest_topic_id:
+        reply_to = pair.dest_topic_id
 
     sent = None
 

@@ -18,7 +18,14 @@ def _state_path() -> Path:
     return config.SESSION_DIR / "forward_state.json"
 
 
-def state_key(short_id: str, source_id: int, dest_id: int) -> str:
+def state_key(short_id: str, source_id: int, dest_id: int, topic_id: int = 0) -> str:
+    """Per-pair state key.
+
+    Topic-aware pairs get a 4-part key; topic_id=0 (no topic) keeps the legacy
+    3-part key so existing forward_state.json entries keep matching.
+    """
+    if topic_id:
+        return f"{short_id}:{source_id}:{dest_id}:{topic_id}"
     return f"{short_id}:{source_id}:{dest_id}"
 
 

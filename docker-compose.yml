@@ -1,27 +1,44 @@
 services:
+  # Single-service setup. Used for:
+  #   - building the image: `docker compose build`
+  #   - one-off commands: `docker compose run --rm forwarder <subcommand>`
+  #   - running ONE forwarder long-term: edit `command` and `docker compose up -d`
+  #
+  # For running MANY users at once (one container per user), don't try to add
+  # services here — use `forwarder.sh` instead. It runs `docker run` directly
+  # against the image this file builds, so you don't need a service definition
+  # per user. See README section 8.
   forwarder:
     build: .
     image: telegram-forwarder:latest
     container_name: telegram-forwarder
     env_file: .env
     volumes:
-      # Map host directory to container session dir so sessions survive container restarts.
+      # Sessions, users.json, forward_state.json — survive container restarts.
       - ./data/sessions:/data/sessions
+      # Forward configs. Drop *.json files into ./configs and reference them
+      # from inside the container at /app/configs/<name>.json.
+      - ./configs:/app/configs:ro
     stdin_open: true   # keep STDIN open for interactive login
     tty: true          # allocate a TTY for OTP / 2FA prompts
     restart: unless-stopped
 
     # `command` controls what runs when you do `docker compose up`.
-    # Use `docker compose run --rm forwarder <subcommand>` for one-off operations:
+    # For one-off operations, use `docker compose run --rm forwarder <subcommand>`:
     #   docker compose run --rm forwarder login
-    #   docker compose run --rm forwarder list-groups
-    #   docker compose run --rm forwarder logout
+    #   docker compose run --rm forwarder list-users
+    #   docker compose run --rm forwarder logout      -u <short_id>
+    #   docker compose run --rm forwarder list-groups -u <short_id>
+    #   docker compose run --rm forwarder list-topics -u <short_id> -gid <community_id>
+    #   docker compose run --rm forwarder clone-topics -u <short_id> -gid <src_id> -mid <dst_id>
     #
-    # For long-running forwarding, override `command` with your chat IDs/hashes, e.g.:
-    #   command: >
-    #     forward
-    #     -gid -1001234567890 -1009876543210
-    #     -gh  1234567890     9876543210
-    #     -mid -1005555555555 -1006666666666
-    #     -mh  5555555555     6666666666
+    # For long-running forwarding of a SINGLE user, replace the `command` below
+    # with your real config file path. Then `docker compose up -d`.
+    #
+    # Example:
+    #   command: ["forward", "-c", "/app/configs/15e2b0.json"]
+    #
+    # For MULTIPLE users running concurrently, use ./forwarder.sh — it spawns
+    # one container per user from this same image without needing per-user
+    # service definitions in this file.
     command: ["--help"]

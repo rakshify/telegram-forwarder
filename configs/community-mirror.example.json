@@ -1,0 +1,19 @@
+{
+  "_comment_top": "Mirror an entire community into another community (matched by topic title).",
+  "_comment_workflow": [
+    "1) Run `clone-topics` once to seed the destination's topic structure from the source.",
+    "2) Use this `auto` block to bind them at runtime. Topics are matched by title."
+  ],
+
+  "user": "REPLACE_WITH_SHORT_ID",
+
+  "auto": [
+    {
+      "source": "-1001969809629",
+      "source_hash": 1234567890123456789,
+      "dest":   "-1005555555555",
+      "dest_hash": 0,
+      "exclude": ["General"]
+    }
+  ]
+}

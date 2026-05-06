@@ -1,0 +1,51 @@
+{
+  "_comment_top": "Mixed forwarding example matching the README walkthrough:",
+  "_comment_topology": [
+    "  - 2 specific topics from community A (auto + include filter)",
+    "  - all topics from community E except General (auto + exclude filter)",
+    "  - 3 plain supergroups B, C, D forwarded as-is (pairs)"
+  ],
+
+  "user": "REPLACE_WITH_SHORT_ID",
+
+  "auto": [
+    {
+      "_comment": "Pick two specific topics from community A by title.",
+      "source": "-1001000000001",
+      "source_hash": 1111111111111111111,
+      "dest":   "-1002000000001",
+      "dest_hash": 0,
+      "include": ["Stock picks", "Macro & news"]
+    },
+    {
+      "_comment": "Mirror everything in community E except General.",
+      "source": "-1001000000005",
+      "source_hash": 5555555555555555555,
+      "dest":   "-1002000000005",
+      "dest_hash": 0,
+      "exclude": ["General"]
+    }
+  ],
+
+  "pairs": [
+    {
+      "_comment": "Plain group B -> destB.",
+      "source": "-1001000000002",
+      "source_hash": 2222222222222222222,
+      "dest":   "-1002000000002",
+      "dest_hash": 0
+    },
+    {
+      "source": "-1001000000003",
+      "source_hash": 3333333333333333333,
+      "dest":   "-1002000000003",
+      "dest_hash": 0
+    },
+    {
+      "source": "-1001000000004",
+      "source_hash": 4444444444444444444,
+      "dest":   "-1002000000004",
+      "dest_hash": 0
+    }
+  ]
+}
