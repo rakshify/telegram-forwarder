@@ -23,9 +23,10 @@ It supports text, photos, videos, voice messages, video notes, GIFs, audio files
 ```
 telegram-forwarder/
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml                    # base service: build, one-off ops, single-user run
+├── docker-compose.users.yml              # multi-user, declarative (Option B in §8)
 ├── entrypoint.sh
-├── forwarder.sh                          # multi-user lifecycle helper
+├── forwarder.sh                          # multi-user, dynamic / ad-hoc (Option A in §8)
 ├── requirements.txt
 ├── .env.example
 ├── README.md
@@ -351,14 +352,31 @@ The container survives:
 
 To change the forwarding topology later: edit the config in `./configs/`, then `docker compose restart forwarder`. No rebuild needed.
 
-### Multiple forwarders side by side (dynamic, any number of users)
+### Multiple forwarders side by side — two options
 
-For more than one or two users, don't try to define a service per user in `docker-compose.yml` — that doesn't scale. Use the bundled `forwarder.sh` script instead. It runs one container per user from the same image compose builds, with no per-user config in the compose file.
+Two patterns ship in the repo. Pick whichever fits how you work; you can switch later.
+
+| | `forwarder.sh` (dynamic) | `docker-compose.users.yml` (static) |
+|---|---|---|
+| Where state lives | "Whatever containers happen to be running" | The compose file |
+| Add a user | Drop `configs/<id>.json`, run `start <id>` | Edit `docker-compose.users.yml`, append a service block, `up -d` |
+| Remove a user | `stop <id>` | Comment out the service, `up -d` |
+| Single source of truth | No | Yes |
+| Survives EC2 reboot | Yes (each container has `--restart unless-stopped`) | Yes (same) |
+| Reconciles on `up -d` | N/A | Yes — extra services get started, removed services get stopped |
+| Plays well with infra-as-code | No | Yes |
+| Best when | Iterating, shell-driven workflows, ad-hoc users | Production-ish, multi-user EC2, anything you want versioned |
+
+For an EC2 deployment that's meant to run unattended, **the static compose file is the right default.** The dynamic script is fine for local iteration.
+
+#### Option A — `forwarder.sh` (dynamic, ad-hoc)
+
+For more than one or two users, `forwarder.sh` runs one container per user from the same image compose builds. No per-user config in `docker-compose.yml`.
 
 **Convention:** name each user's config `configs/<short_id>.json`. The script keys off that.
 
 ```bash
-# One-time: build the image (compose still owns this)
+# One-time: build the image
 docker compose build
 
 # One-time per user: log in, then save their config
@@ -377,11 +395,53 @@ nano configs/15e2b0.json                                   # define their pairs
 ./forwarder.sh stop-all
 ```
 
-Each container is named `tg-forwarder-<short_id>`, has `--restart unless-stopped`, and shares the same `/data/sessions` volume — so `users.json` stays consistent and `login` only needs to happen once per user no matter how many forwarders are running.
+Each container is named `tg-forwarder-<short_id>`, has `--restart unless-stopped`, and shares the `/data/sessions` volume.
 
-The script is just a thin wrapper around `docker run` — you can read it (`forwarder.sh`) end to end in 30 seconds. Compose continues to own one-off operations (`login`, `list-users`, `clone-topics`) via `docker compose run --rm forwarder ...`.
+#### Option B — `docker-compose.users.yml` (static, declarative)
 
-**To run a single user long-term without the script** (the basic case), edit the `command:` in `docker-compose.yml` to point at one config and `docker compose up -d`. Use the script when you have several users running at once.
+`docker-compose.users.yml` ships in the repo. It defines a `forwarder-base` template service plus per-user services that `extends` it. Each user is a service; you add users by appending a 4-line block.
+
+```bash
+# One-time: build the image (compose still owns the build)
+docker compose build
+
+# One-time per user: log in
+docker compose run --rm forwarder login                    # prints short_id, e.g. 15e2b0
+nano configs/15e2b0.json
+
+# Add a service block to docker-compose.users.yml for each user, then:
+docker compose -f docker-compose.users.yml up -d
+
+# Day-to-day
+docker compose -f docker-compose.users.yml ps
+docker compose -f docker-compose.users.yml logs -f forwarder-15e2b0
+docker compose -f docker-compose.users.yml restart forwarder-15e2b0
+docker compose -f docker-compose.users.yml down
+```
+
+To avoid typing `-f docker-compose.users.yml` every time, add this to your shell:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.users.yml
+```
+
+After that, `docker compose up -d` brings everything up (including the multi-user services), and one-off commands like `docker compose run --rm forwarder login` keep working through the base file.
+
+A new user is one block:
+
+```yaml
+  forwarder-8a9bcf:
+    extends:
+      service: forwarder-base
+    container_name: tg-forwarder-8a9bcf
+    command: ["forward", "-c", "/app/configs/8a9bcf.json"]
+```
+
+Then `docker compose -f docker-compose.users.yml up -d` — compose reconciles, starting the new one without touching the others.
+
+Both options share `/data/sessions`, so `users.json` stays consistent and `login` only needs to happen once per user no matter which option you use.
+
+**To run a single user long-term** (the basic case, no multi-user setup at all), edit the `command:` in `docker-compose.yml` to point at one config and `docker compose up -d`. The two options above are only relevant when you want several users running concurrently.
 
 ---
 
