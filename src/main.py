@@ -2,10 +2,12 @@
 
 Subcommands
 -----------
-login         Interactive login (phone, OTP, optional 2FA).
-logout        Revoke the user session and delete local session files.
-list-groups   Print every group/channel the user is in with id and access_hash.
-forward       Forward N source chats to N destination chats (1:1 mapped).
+login         Interactive login. After success, prints the new short_id.
+logout        Revoke and delete a specific user's session (-u SHORT_ID).
+list-users    Print every registered user with short_id, user_id, phone, name.
+list-groups   Print every group/channel a specific user is in (-u SHORT_ID).
+forward       Forward N source chats to N destination chats (1:1 mapped),
+              using the session of a specific user (-u SHORT_ID).
 """
 import argparse
 import asyncio
@@ -28,38 +30,57 @@ def _build_parser() -> argparse.ArgumentParser:
         "login",
         help="Interactive login (phone number + OTP + optional 2FA password).",
     )
+
     sub.add_parser(
-        "logout",
-        help="Revoke the user session server-side and delete local session files.",
-    )
-    sub.add_parser(
-        "list-groups",
-        help="List every group/channel the logged-in user is in along with its id and access_hash.",
+        "list-users",
+        help="List every registered user with short_id, user_id, phone, and name.",
     )
 
-    forward = sub.add_parser(
+    p_logout = sub.add_parser(
+        "logout",
+        help="Revoke a user's session server-side and delete their local session files.",
+    )
+    p_logout.add_argument(
+        "-u", "--user", required=True, metavar="SHORT_ID",
+        help="Short ID of the user to log out (see `list-users`).",
+    )
+
+    p_groups = sub.add_parser(
+        "list-groups",
+        help="List every group/channel a specific user is in along with its id and access_hash.",
+    )
+    p_groups.add_argument(
+        "-u", "--user", required=True, metavar="SHORT_ID",
+        help="Short ID of the user whose session to use (see `list-users`).",
+    )
+
+    p_forward = sub.add_parser(
         "forward",
         help="Forward N source chats to N destination chats (1:1 by position).",
     )
-    forward.add_argument(
+    p_forward.add_argument(
+        "-u", "--user", required=True, metavar="SHORT_ID",
+        help="Short ID of the user whose session to use as the source listener.",
+    )
+    p_forward.add_argument(
         "-gid", "--group_chat_id",
         nargs="+", required=True, metavar="ID",
         help="Source chat IDs (e.g. -1001234567890). Space-separated for multiple.",
     )
-    forward.add_argument(
+    p_forward.add_argument(
         "-gh", "--group_chat_hash",
         nargs="+", required=True, metavar="HASH",
-        help="Source chat access_hashes, in the same order as -gid.",
+        help="Source chat access_hashes, in the same order as -gid. Use 0 for basic groups.",
     )
-    forward.add_argument(
+    p_forward.add_argument(
         "-mid", "--mapped_chat_id",
         nargs="+", required=True, metavar="ID",
         help="Destination chat IDs, 1:1 mapped to -gid by position.",
     )
-    forward.add_argument(
+    p_forward.add_argument(
         "-mh", "--mapped_chat_hash",
         nargs="+", required=True, metavar="HASH",
-        help="Destination chat access_hashes, in the same order as -mid.",
+        help="Destination chat access_hashes (kept for symmetry; bot resolves its own at runtime).",
     )
 
     return parser
@@ -80,29 +101,29 @@ def _build_pairs(args: argparse.Namespace) -> List[fwd.ChatPair]:
     if n == 0:
         raise SystemExit("At least one source/destination pair is required.")
 
-    pairs: List[fwd.ChatPair] = []
-    for gid, gh, mid, mh in zip(gids, ghs, mids, mhs):
-        pairs.append(
-            fwd.ChatPair(
-                source_id=fwd.parse_chat_id(gid),
-                source_hash=int(gh),
-                dest_id=fwd.parse_chat_id(mid),
-                dest_hash=int(mh),
-            )
+    return [
+        fwd.ChatPair(
+            source_id=fwd.parse_chat_id(gid),
+            source_hash=int(gh),
+            dest_id=fwd.parse_chat_id(mid),
+            dest_hash=int(mh),
         )
-    return pairs
+        for gid, gh, mid, mh in zip(gids, ghs, mids, mhs)
+    ]
 
 
 async def _amain(args: argparse.Namespace) -> None:
     if args.command == "login":
         await auth.login()
     elif args.command == "logout":
-        await auth.logout()
+        await auth.logout(args.user)
+    elif args.command == "list-users":
+        auth.list_users()
     elif args.command == "list-groups":
-        await lg.list_groups()
+        await lg.list_groups(args.user)
     elif args.command == "forward":
         pairs = _build_pairs(args)
-        await fwd.forward_pairs(pairs)
+        await fwd.forward_pairs(args.user, pairs)
 
 
 def main() -> None:

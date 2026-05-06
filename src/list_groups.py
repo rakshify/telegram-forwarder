@@ -1,27 +1,27 @@
-"""Print every group / channel the logged-in user is in,
-along with chat-id and access_hash so they can be plugged into `forward`.
+"""Print every group / channel the selected user is in,
+with chat-id and access_hash so they can be plugged into `forward`.
 """
 from telethon import TelegramClient
 from telethon.tl.types import Channel, Chat
 
-from . import config
+from . import config, users
 
 
-async def list_groups() -> None:
+async def list_groups(short_id: str) -> None:
     config.validate(require_bot=False)
+    record = users.get_user(short_id)
 
     client = TelegramClient(
-        str(config.USER_SESSION_PATH),
-        config.api_id_int(),
-        config.TG_API_HASH,
+        str(record.session_base), config.api_id_int(), config.TG_API_HASH
     )
     await client.connect()
 
     if not await client.is_user_authorized():
-        print("Not logged in. Run `login` first.")
+        print(f"User {short_id} not authorized. Run `login` again for that account.")
         await client.disconnect()
         return
 
+    print(f"Listing groups visible to {record.display_name} (short_id={short_id})")
     header = f"{'TYPE':<11}{'CHAT_ID':<18}{'ACCESS_HASH':<22}TITLE"
     print(header)
     print("-" * len(header) * 2)
