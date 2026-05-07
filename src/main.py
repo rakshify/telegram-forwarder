@@ -2,10 +2,12 @@
 
 Subcommands
 -----------
-login         Interactive login (phone, OTP, optional 2FA).
-logout        Revoke the user session and delete local session files.
-list-groups   Print every group/channel the user is in with id and access_hash.
-forward       Forward N source chats to N destination chats (1:1 mapped).
+login         Interactive login. After success, prints the new short_id.
+logout        Revoke and delete a specific user's session (-u SHORT_ID).
+list-users    Print every registered user with short_id, user_id, phone, name.
+list-groups   Print every group/channel a specific user is in (-u SHORT_ID).
+forward       Forward N source chats to N destination chats (1:1 mapped),
+              using the session of a specific user (-u SHORT_ID).
 """
 import argparse
 import asyncio
@@ -28,38 +30,106 @@ def _build_parser() -> argparse.ArgumentParser:
         "login",
         help="Interactive login (phone number + OTP + optional 2FA password).",
     )
+
     sub.add_parser(
-        "logout",
-        help="Revoke the user session server-side and delete local session files.",
-    )
-    sub.add_parser(
-        "list-groups",
-        help="List every group/channel the logged-in user is in along with its id and access_hash.",
+        "list-users",
+        help="List every registered user with short_id, user_id, phone, and name.",
     )
 
-    forward = sub.add_parser(
+    p_logout = sub.add_parser(
+        "logout",
+        help="Revoke a user's session server-side and delete their local session files.",
+    )
+    p_logout.add_argument(
+        "-u", "--user", required=True, metavar="SHORT_ID",
+        help="Short ID of the user to log out (see `list-users`).",
+    )
+
+    p_groups = sub.add_parser(
+        "list-groups",
+        help="List every group/channel a specific user is in along with its id and access_hash.",
+    )
+    p_groups.add_argument(
+        "-u", "--user", required=True, metavar="SHORT_ID",
+        help="Short ID of the user whose session to use (see `list-users`).",
+    )
+
+    p_topics = sub.add_parser(
+        "list-topics",
+        help="List topics inside a forum-enabled supergroup (community).",
+    )
+    p_topics.add_argument(
+        "-u", "--user", required=True, metavar="SHORT_ID",
+        help="Short ID of the user whose session to use.",
+    )
+    p_topics.add_argument(
+        "-gid", "--group_chat_id", required=True, metavar="ID",
+        help="Parent supergroup id (e.g. -1001234567890).",
+    )
+
+    p_clone = sub.add_parser(
+        "clone-topics",
+        help="Create matching topics in DST community for every topic in SRC. "
+             "User must be admin in DST with manage-topics permission.",
+    )
+    p_clone.add_argument(
+        "-u", "--user", required=True, metavar="SHORT_ID",
+        help="Short ID of the user whose session to use.",
+    )
+    p_clone.add_argument(
+        "-gid", "--group_chat_id", required=True, metavar="SRC_ID",
+        help="Source community id to copy topics from.",
+    )
+    p_clone.add_argument(
+        "-mid", "--mapped_chat_id", required=True, metavar="DST_ID",
+        help="Destination community id to create topics in.",
+    )
+
+    p_forward = sub.add_parser(
         "forward",
         help="Forward N source chats to N destination chats (1:1 by position).",
     )
-    forward.add_argument(
+    p_forward.add_argument(
+        "-u", "--user", required=False, metavar="SHORT_ID", default=None,
+        help="Short ID of the user whose session to use as the source listener. "
+             "Required unless the config file (--config) sets `user`.",
+    )
+    p_forward.add_argument(
+        "-c", "--config", metavar="PATH", default=None,
+        help="Path to a JSON config file describing pairs. Mutually exclusive "
+             "with the per-flag pair arguments below.",
+    )
+    p_forward.add_argument(
         "-gid", "--group_chat_id",
-        nargs="+", required=True, metavar="ID",
+        nargs="+", required=False, metavar="ID",
         help="Source chat IDs (e.g. -1001234567890). Space-separated for multiple.",
     )
-    forward.add_argument(
+    p_forward.add_argument(
         "-gh", "--group_chat_hash",
-        nargs="+", required=True, metavar="HASH",
-        help="Source chat access_hashes, in the same order as -gid.",
+        nargs="+", required=False, metavar="HASH",
+        help="Source chat access_hashes, in the same order as -gid. Use 0 for basic groups.",
     )
-    forward.add_argument(
+    p_forward.add_argument(
         "-mid", "--mapped_chat_id",
-        nargs="+", required=True, metavar="ID",
+        nargs="+", required=False, metavar="ID",
         help="Destination chat IDs, 1:1 mapped to -gid by position.",
     )
-    forward.add_argument(
+    p_forward.add_argument(
         "-mh", "--mapped_chat_hash",
-        nargs="+", required=True, metavar="HASH",
-        help="Destination chat access_hashes, in the same order as -mid.",
+        nargs="+", required=False, metavar="HASH",
+        help="Destination chat access_hashes (kept for symmetry; bot resolves its own at runtime).",
+    )
+    p_forward.add_argument(
+        "-tid", "--topic_id",
+        nargs="+", default=None, metavar="TOPIC_ID",
+        help="Optional per-pair source topic ids (1:1 with -gid). Use 0 for whole chat. "
+             "Omit entirely to disable source topic filtering for all pairs.",
+    )
+    p_forward.add_argument(
+        "-mtid", "--mapped_topic_id",
+        nargs="+", default=None, metavar="TOPIC_ID",
+        help="Optional per-pair destination topic ids (1:1 with -mid). Use 0 to post in "
+             "the main feed. Omit entirely to disable destination topic routing for all pairs.",
     )
 
     return parser
@@ -70,6 +140,10 @@ def _build_pairs(args: argparse.Namespace) -> List[fwd.ChatPair]:
     ghs: List[str] = args.group_chat_hash
     mids: List[str] = args.mapped_chat_id
     mhs: List[str] = args.mapped_chat_hash
+    tids: List[str] = args.topic_id if args.topic_id is not None else ["0"] * len(gids)
+    mtids: List[str] = (
+        args.mapped_topic_id if args.mapped_topic_id is not None else ["0"] * len(gids)
+    )
 
     n = len(gids)
     if not (len(ghs) == len(mids) == len(mhs) == n):
@@ -77,32 +151,66 @@ def _build_pairs(args: argparse.Namespace) -> List[fwd.ChatPair]:
             "Length mismatch: -gid, -gh, -mid, -mh must all have the same number of values "
             f"(got {len(gids)}, {len(ghs)}, {len(mids)}, {len(mhs)})."
         )
+    if len(tids) != n:
+        raise SystemExit(
+            f"-tid must have the same number of values as -gid "
+            f"(got {len(tids)} vs {n})."
+        )
+    if len(mtids) != n:
+        raise SystemExit(
+            f"-mtid must have the same number of values as -mid "
+            f"(got {len(mtids)} vs {n})."
+        )
     if n == 0:
         raise SystemExit("At least one source/destination pair is required.")
 
-    pairs: List[fwd.ChatPair] = []
-    for gid, gh, mid, mh in zip(gids, ghs, mids, mhs):
-        pairs.append(
-            fwd.ChatPair(
-                source_id=fwd.parse_chat_id(gid),
-                source_hash=int(gh),
-                dest_id=fwd.parse_chat_id(mid),
-                dest_hash=int(mh),
-            )
+    return [
+        fwd.ChatPair(
+            source_id=fwd.parse_chat_id(gid),
+            source_hash=int(gh),
+            dest_id=fwd.parse_chat_id(mid),
+            dest_hash=int(mh),
+            topic_id=int(tid),
+            dest_topic_id=int(mtid),
         )
-    return pairs
+        for gid, gh, mid, mh, tid, mtid in zip(gids, ghs, mids, mhs, tids, mtids)
+    ]
 
 
 async def _amain(args: argparse.Namespace) -> None:
     if args.command == "login":
         await auth.login()
     elif args.command == "logout":
-        await auth.logout()
+        await auth.logout(args.user)
+    elif args.command == "list-users":
+        auth.list_users()
     elif args.command == "list-groups":
-        await lg.list_groups()
+        await lg.list_groups(args.user)
+    elif args.command == "list-topics":
+        await lg.list_topics(args.user, args.group_chat_id)
+    elif args.command == "clone-topics":
+        await lg.clone_topics(args.user, args.group_chat_id, args.mapped_chat_id)
     elif args.command == "forward":
-        pairs = _build_pairs(args)
-        await fwd.forward_pairs(pairs)
+        if args.config:
+            from . import config_file
+            from pathlib import Path
+            short_id, pairs = await config_file.load_config(
+                Path(args.config), fallback_short_id=args.user
+            )
+            await fwd.forward_pairs(short_id, pairs)
+        else:
+            if not args.user:
+                raise SystemExit("forward: -u/--user is required unless --config is used.")
+            for required, name in [
+                (args.group_chat_id, "-gid"),
+                (args.group_chat_hash, "-gh"),
+                (args.mapped_chat_id, "-mid"),
+                (args.mapped_chat_hash, "-mh"),
+            ]:
+                if not required:
+                    raise SystemExit(f"forward: {name} is required unless --config is used.")
+            pairs = _build_pairs(args)
+            await fwd.forward_pairs(args.user, pairs)
 
 
 def main() -> None:

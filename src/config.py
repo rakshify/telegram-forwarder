@@ -19,7 +19,7 @@ TG_API_HASH = os.environ.get("TG_API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SESSION_DIR = Path(os.environ.get("SESSION_DIR", "/data/sessions"))
 
-USER_SESSION_PATH = SESSION_DIR / "user_session"
+# Bot's session — single bot regardless of how many user accounts are registered.
 BOT_SESSION_PATH = SESSION_DIR / "bot_session"
 
 

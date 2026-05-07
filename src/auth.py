@@ -1,96 +1,121 @@
-"""User-session authentication flows.
+"""Multi-user authentication: login, logout, list-users.
 
-`login`  : interactive — prompts for phone number, OTP, and 2FA password if needed.
-`logout` : revokes the user session server-side and removes the local session files.
+Every login produces a UserRecord stored in users.json and a session file
+named `user_<short_id>.session`. The short_id is deterministic (hash of the
+Telegram user id), so re-logging into the same account refreshes that
+account's session in place rather than creating a duplicate.
 """
+import secrets
 import sys
 from getpass import getpass
 
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
-from . import config
+from . import config, users
 
 
 async def login() -> None:
-    """Interactive login. Stores a session file at config.USER_SESSION_PATH.
-
-    Run this against a TTY (locally, or via `docker compose run -it forwarder login`).
+    """Interactive login. Registers the resulting account in users.json under a
+    deterministic short_id derived from its Telegram user id.
     """
     config.validate(require_bot=False)
-    print(f"User session will be saved to: {config.USER_SESSION_PATH}.session")
-
-    client = TelegramClient(
-        str(config.USER_SESSION_PATH),
-        config.api_id_int(),
-        config.TG_API_HASH,
-    )
-    await client.connect()
-
-    if await client.is_user_authorized():
-        me = await client.get_me()
-        uname = f"@{me.username}" if me.username else "(no username)"
-        print(f"Already logged in as {me.first_name} {uname}. "
-              "Run `logout` first if you want to switch accounts.")
-        await client.disconnect()
-        return
 
     if not sys.stdin.isatty():
-        print(
-            "Login requires a TTY for the OTP / 2FA prompts.\n"
-            "Re-run with: docker compose run --rm forwarder login",
-            file=sys.stderr,
+        raise SystemExit(
+            "Login requires a TTY for OTP / 2FA prompts.\n"
+            "Use: docker compose run --rm forwarder login"
         )
-        await client.disconnect()
-        raise SystemExit(1)
 
-    phone = input("Phone number with country code (e.g. +14155551234): ").strip()
-    sent = await client.send_code_request(phone)
-    code = input("OTP code received on Telegram: ").strip()
-
-    try:
-        await client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
-    except SessionPasswordNeededError:
-        password = getpass("Two-factor authentication password: ")
-        await client.sign_in(password=password)
-
-    me = await client.get_me()
-    uname = f"@{me.username}" if me.username else "(no username)"
-    print(f"Logged in as {me.first_name} {uname}.")
-    await client.disconnect()
-
-
-async def logout() -> None:
-    """Revoke the user session on Telegram's servers and delete local session files."""
-    config.validate(require_bot=False)
-
-    client = TelegramClient(
-        str(config.USER_SESSION_PATH),
-        config.api_id_int(),
-        config.TG_API_HASH,
-    )
+    # Login under a temp session — we can't pick the final filename until we
+    # know the user's id (only available via get_me() after sign_in).
+    tmp_base = config.SESSION_DIR / f"_tmp_login_{secrets.token_hex(4)}"
+    client = TelegramClient(str(tmp_base), config.api_id_int(), config.TG_API_HASH)
     await client.connect()
 
+    try:
+        phone = input("Phone number with country code (e.g. +14155551234): ").strip()
+        sent = await client.send_code_request(phone)
+        code = input("OTP code received on Telegram: ").strip()
+        try:
+            await client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
+        except SessionPasswordNeededError:
+            password = getpass("Two-factor authentication password: ")
+            await client.sign_in(password=password)
+
+        me = await client.get_me()
+    except BaseException:
+        # On any failure, drop the temp session so we don't litter the volume
+        await client.disconnect()
+        users.cleanup_session_files(tmp_base)
+        raise
+
+    short_id = users.make_short_id(me.id)
+    record = users.UserRecord(
+        short_id=short_id,
+        user_id=me.id,
+        first_name=me.first_name,
+        last_name=me.last_name,
+        username=me.username,
+        phone=me.phone,
+    )
+
+    await client.disconnect()
+
+    # Move temp session files to the per-user location, replacing any prior
+    # files for this account (re-login refreshes in place).
+    final_base = record.session_base
+    is_refresh = final_base.with_suffix(".session").exists()
+    users.cleanup_session_files(final_base)
+    for suffix in (".session", ".session-journal"):
+        src = tmp_base.with_suffix(suffix)
+        if src.exists():
+            src.rename(final_base.with_suffix(suffix))
+
+    users.upsert_user(record)
+    verb = "Refreshed session" if is_refresh else "Logged in"
+    print(f"{verb} for {record.display_name} "
+          f"(short_id={short_id}, user_id={me.id}).")
+
+
+async def logout(short_id: str) -> None:
+    """Revoke the given user's session server-side and delete the local files."""
+    config.validate(require_bot=False)
+    record = users.get_user(short_id)
+
+    client = TelegramClient(
+        str(record.session_base), config.api_id_int(), config.TG_API_HASH
+    )
+    await client.connect()
     if await client.is_user_authorized():
         try:
             await client.log_out()
-            print("Server-side session revoked.")
+            print(f"Server-side session revoked for {record.short_id}.")
         except Exception as e:
-            print(f"Server-side log_out failed (continuing with local cleanup): {e}")
+            print(f"Server log_out failed (continuing with local cleanup): {e}")
     else:
-        print("No active server-side session.")
-
+        print(f"No active server-side session for {record.short_id}.")
     await client.disconnect()
 
-    # Delete local session artifacts
-    removed = []
-    for suffix in (".session", ".session-journal"):
-        path = config.USER_SESSION_PATH.with_suffix(suffix)
-        if path.exists():
-            path.unlink()
-            removed.append(path.name)
+    users.cleanup_session_files(record.session_base)
+    users.remove_user(short_id)
+    print(f"Removed user {short_id} ({record.display_name}).")
 
-    if removed:
-        print(f"Removed local file(s): {', '.join(removed)}")
-    else:
-        print("No local session file to remove.")
+
+def list_users() -> None:
+    """Print every registered user with their short_id, user_id, phone, and name."""
+    db = users.load_db()
+    if not db:
+        print("No users registered. Run `login` to add one.")
+        return
+
+    header = (f"{'SHORT_ID':<10}{'USER_ID':<14}{'PHONE':<18}"
+              f"{'NAME':<32}SESSION_FILE")
+    print(header)
+    print("-" * len(header))
+    for sid, rec in db.items():
+        phone = rec.phone or "(unknown)"
+        if phone != "(unknown)" and not phone.startswith("+"):
+            phone = f"+{phone}"
+        print(f"{sid:<10}{rec.user_id:<14}{phone:<18}"
+              f"{rec.display_name:<32}{rec.session_filename}")

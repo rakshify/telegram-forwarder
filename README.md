@@ -1,19 +1,20 @@
 # telegram-forwarder
 
-Forward messages from **N Telegram chats** to **N mapped Telegram chats** (1:1) using a Telegram bot. Built with [Telethon](https://docs.telethon.dev/), packaged for Docker, and ready to deploy to AWS / GCP / any container runtime.
+Forward messages from **N Telegram chats** to **N mapped Telegram chats** (1:1) using a Telegram bot. Built with [Telethon](https://docs.telethon.dev/), packaged for Docker, ready to deploy on AWS / GCP / any container runtime.
 
-It supports text, photos, videos, voice messages, video notes, GIFs, audio files, generic documents, and polls — and replies in the source chat appear as proper replies in the destination.
+It supports text, photos, videos, voice messages, video notes, GIFs, audio files, generic documents, polls — replies stay threaded, missed messages are caught up on restart, and forum-supergroup ("community") topics can be filtered on the source and routed on the destination.
 
 ---
 
 ## Features
 
-- **N → N forwarding.** One source chat per destination, by position. Run as many pairs as you like in a single process.
-- **Reply preservation.** A per-pair message-id map ensures replies in the destination point at the right message.
-- **All common media types.** Polls are reconstructed; everything else is downloaded by the user account and re-uploaded by the bot.
-- **Two clear flows:** one to discover chat IDs/access-hashes, one to run the forwarder.
-- **Container-ready.** Persistent volume for sessions, env-var config, no host paths baked in.
-- **Logout / kill-session command** to revoke the user session on Telegram and wipe local session files.
+- **Multiple user accounts.** Log in any number of Telegram user accounts. Each gets a deterministic 6-character `short_id` (hash of the user's Telegram id) that you reference in every other command.
+- **N → N forwarding.** As many source → destination pairs as you want in a single process.
+- **Topic-aware.** Filter source by forum topic; route destination into a specific topic.
+- **Catch-up on restart.** Last-forwarded source message id is persisted per pair. On startup, missed messages are backfilled before the live listener attaches. First-ever run for a pair establishes a baseline at "now" — no full-history backfill.
+- **Reply preservation.** Replies in source become replies in destination, via a per-pair message-id map.
+- **Config-file driven.** Express your entire forwarding topology in JSON; mix explicit `pairs` with `auto` blocks that mirror a community by topic title.
+- **Container-ready.** Persistent volume for sessions and state, env-var config, no host paths baked in.
 
 ---
 
@@ -22,187 +23,489 @@ It supports text, photos, videos, voice messages, video notes, GIFs, audio files
 ```
 telegram-forwarder/
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml                    # base service: build, one-off ops, single-user run
+├── docker-compose.users.yml              # multi-user, declarative (Option B in §8)
 ├── entrypoint.sh
+├── forwarder.sh                          # multi-user, dynamic / ad-hoc (Option A in §8)
 ├── requirements.txt
 ├── .env.example
-├── .gitignore
 ├── README.md
+├── configs/                              # bind-mounted to /app/configs
+│   ├── README.md
+│   ├── simple.example.json
+│   ├── community-mirror.example.json
+│   └── mixed.example.json
 └── src/
-    ├── __init__.py
-    ├── main.py            # argparse CLI (login / logout / list-groups / forward)
-    ├── config.py          # env vars + session paths
-    ├── auth.py            # interactive login + logout (kill session)
-    ├── list_groups.py     # Flow 1: print id + access_hash for every group/channel
-    └── forwarder.py       # Flow 2: forward N source chats to N destination chats
+    ├── main.py            # argparse CLI
+    ├── config.py          # env vars + paths
+    ├── auth.py            # login / logout / list-users
+    ├── users.py           # users.json registry, short_id derivation
+    ├── state.py           # forward_state.json (last-seen msg id per pair)
+    ├── list_groups.py     # list-groups, list-topics, clone-topics
+    ├── forwarder.py       # forward + catch-up logic
+    └── config_file.py     # JSON config loader (-c / --config)
+```
+
+The persistent volume `/data/sessions` (host: `./data/sessions`) holds:
+
+```
+users.json                  # registry of logged-in accounts
+forward_state.json          # last-forwarded msg id per (user, source, dest, topic)
+user_<short_id>.session     # per-user Telethon session
+bot_session.session         # bot session (single bot, shared)
 ```
 
 ---
 
-## 1. Configure
+## Setup
 
-Get your API credentials at <https://my.telegram.org/apps>, and create a bot via [@BotFather](https://t.me/BotFather).
+### 1. Configure
+
+Get your API credentials at <https://my.telegram.org/apps>. Create a bot via [@BotFather](https://t.me/BotFather).
 
 ```bash
 cp .env.example .env
-# edit .env and fill in:
-#   TG_API_ID
-#   TG_API_HASH
-#   BOT_TOKEN
+# edit .env and fill in: TG_API_ID, TG_API_HASH, BOT_TOKEN
 ```
 
-**Important:** the bot must be a member of every destination chat, with permission to send messages. Add it manually first.
+The bot must be a member of every destination chat with permission to send messages. For posting into specific topics, the bot also needs **Manage Topics** admin permission on the destination supergroup.
 
----
-
-## 2. Build the image
+### 2. Build
 
 ```bash
 docker compose build
 ```
 
-Sessions live on the host at `./data/sessions/` (mounted into the container at `/data/sessions`). They survive container restarts and image rebuilds.
+---
+
+## Commands at a glance
+
+| Command | Purpose |
+|---|---|
+| `login` | Add a user account (interactive: phone, OTP, optional 2FA). |
+| `list-users` | Show all logged-in accounts with `short_id`, name, phone. |
+| `logout -u <short_id>` | Revoke a user's session and delete their local files. |
+| `list-groups -u <short_id>` | Show every group/channel a user is in (id + access_hash). |
+| `list-topics -u <short_id> -gid <community>` | Show topics inside a forum supergroup. |
+| `clone-topics -u <short_id> -gid <src> -mid <dst>` | Copy topic structure from src community to dst community. |
+| `forward …` | The actual forwarder. Takes either CLI flags or `-c <config.json>`. |
+
+Every command except `forward` is a one-shot operation; `forward` is the long-running one.
 
 ---
 
-## 3. Log in (interactive — phone, OTP, optional 2FA)
+## 3. Login
 
-The login flow needs a TTY for the prompts. Use `docker compose run` (not `up`) so STDIN is attached:
+The login flow needs a TTY. Use `docker compose run` (not `up`):
 
 ```bash
 docker compose run --rm forwarder login
 ```
 
-You'll be asked for:
-
+You'll be prompted for:
 1. Phone number with country code (e.g. `+14155551234`)
 2. The OTP that Telegram sends you
 3. Your 2FA password — only if you have 2FA enabled
 
-The session is saved at `./data/sessions/user_session.session` on the host.
+After success it prints something like:
+
+```
+Logged in for Rakshit @rakshify (short_id=15e2b0, user_id=123456789).
+```
+
+**Save the `short_id`** — that's how you'll reference this account in every other command. Run `login` again to add more accounts.
+
+```bash
+docker compose run --rm forwarder list-users
+```
+
+```
+SHORT_ID  USER_ID       PHONE             NAME                            SESSION_FILE
+15e2b0    123456789     +14155551234      Rakshit @rakshify               user_15e2b0.session
+8a9bcf    987654321     +919876543210     Other Account @other            user_8a9bcf.session
+```
+
+To revoke a user's session and delete their local files:
+
+```bash
+docker compose run --rm forwarder logout -u 15e2b0
+```
 
 ---
 
-## 4. Flow 1 — list groups (get chat IDs + access hashes)
+## 4. Discover groups
 
 ```bash
-docker compose run --rm forwarder list-groups
+docker compose run --rm forwarder list-groups -u 15e2b0
 ```
-
-Prints something like:
 
 ```
 TYPE       CHAT_ID           ACCESS_HASH           TITLE
--------------------------------------------------------------
 supergroup -1001234567890    1234567890123456789   My source group
-channel    -1009876543210    9876543210987654321   Some channel
-supergroup -1005555555555    5555555555555555555   My destination group
+group      -9876543210       0                     My basic source group
+community  -1001969809629    7777777777777777777   Hyderabad Investing Enthusiasts
 ```
 
-Save the IDs and access-hashes — you'll plug them into the forward command. Basic (legacy) groups print `0` for the access_hash; pass `0` literally for `-gh` / `-mh` and the tool will route them through `InputPeerChat` automatically.
+- **`supergroup`** — modern group, has an access_hash.
+- **`group`** — legacy basic group, no access_hash. Pass `0` to `-gh` / `-mh` and the tool routes it through `InputPeerChat`.
+- **`community`** — forum-enabled supergroup with topics. List topics with `list-topics`.
 
 ---
 
-## 5. Flow 2 — forward N → N
+## 5. Communities (forum supergroups / topics)
+
+Telegram "communities" are forum-enabled supergroups: a single supergroup containing multiple **topics** (threaded sub-channels). Topics share the parent's chat_id. Each topic is identified by the id of its first message ("top message id"), which is what the `topic` argument takes.
+
+**List topics in a community:**
+
+```bash
+docker compose run --rm forwarder list-topics -u 15e2b0 -gid -1001969809629
+```
+
+```
+Topics in 'Hyderabad Investing Enthusiasts' (parent_chat_id=-1001969809629)
+TOPIC_ID    CLOSED  TITLE
+1                   General
+17                  Stock picks
+42                  Macro & news
+99          yes     Old retired threads
+```
+
+Topic id `1` is the always-present **General** topic.
+
+**Clone a community's topic structure** into your own community. Both must already be forum-enabled supergroups (toggle "Topics" in group settings); the user account must be admin in the destination with manage-topics permission. Existing matching titles in the destination are skipped — idempotent.
+
+```bash
+docker compose run --rm forwarder clone-topics \
+  -u 15e2b0 \
+  -gid -1001969809629 \
+  -mid -1005555555555
+```
+
+After cloning, run `list-topics` on the destination to discover the new TOPIC_IDs (each forum has its own id space — the destination's "Stock picks" topic has a different id from the source's "Stock picks").
+
+---
+
+## 6. Forwarding — config file (recommended)
+
+For anything beyond a couple of pairs, drop a JSON config in `./configs/` and pass it with `-c`:
+
+```bash
+docker compose run --rm forwarder forward -c /app/configs/mixed.json
+```
+
+The `./configs` directory is bind-mounted to `/app/configs` in the container by `docker-compose.yml`, so you can swap configs without rebuilding. Edits to the file are visible inside the container immediately; `docker compose restart forwarder` picks up changes.
+
+### Schema
+
+```json
+{
+  "user": "15e2b0",
+
+  "pairs": [
+    {
+      "source": "-1001234567890",
+      "source_hash": 9876543210987654321,
+      "dest":   "-1006666666666",
+      "dest_hash": 0,
+      "topic": 17,
+      "dest_topic": 5
+    }
+  ],
+
+  "auto": [
+    {
+      "source": "-1001969809629",
+      "source_hash": 1234567890123456789,
+      "dest":   "-1005555555555",
+      "dest_hash": 0,
+      "include": ["Stock picks", "Macro & news"],
+      "exclude": ["General"]
+    }
+  ]
+}
+```
+
+| Top-level key | Required? | Meaning |
+|---|---|---|
+| `user` | only if `-u` not on CLI | Short ID from `list-users`. |
+| `pairs` | one of `pairs`/`auto` is required | List of explicit ChatPair objects. |
+| `auto` | one of `pairs`/`auto` is required | List of community-mirror blocks (expand at startup). |
+
+### `pairs` — explicit, one-by-one
+
+Each entry is exactly one ChatPair:
+
+| Field | Required? | Meaning |
+|---|---|---|
+| `source` | yes | Source chat id (e.g. `-1001234567890` or `-9876543210` for basic groups). |
+| `source_hash` | yes | Source access_hash. `0` for basic groups. |
+| `dest` | yes | Destination chat id. |
+| `dest_hash` | yes | Destination access_hash. `0` for basic groups; ignored at runtime since the bot resolves its own. |
+| `topic` | optional, default `0` | Source forum topic id. `0` = no filter. |
+| `dest_topic` | optional, default `0` | Destination forum topic id. `0` = main feed. |
+
+### `auto` — community-mirror form
+
+Each entry describes a *pair of communities*. At startup the forwarder reads both topic lists and emits one ChatPair per topic title that exists in **both**:
+
+| Field | Required? | Meaning |
+|---|---|---|
+| `source` / `source_hash` | yes | Source community. |
+| `dest` / `dest_hash` | yes | Destination community. |
+| `include` | optional | Whitelist of titles. If present, only these titles are considered. |
+| `exclude` | optional | Blacklist of titles. Always applied after `include`. |
+
+`auto` matches by title. If you rename a topic in only one community, that pair stops firing until both sides are renamed (or moved into `pairs` with explicit ids). For rock-solid mappings, use `pairs`. For convenience after `clone-topics`, use `auto`.
+
+### Mixed example
+
+You can use `pairs` and `auto` together. Topology: 2 specific topics from community A, all of community E except General, and three plain supergroups B/C/D forwarded as-is:
+
+```json
+{
+  "user": "15e2b0",
+
+  "auto": [
+    {
+      "source": "-1001000000001", "source_hash": 1111111111111111111,
+      "dest":   "-1002000000001", "dest_hash": 0,
+      "include": ["Stock picks", "Macro & news"]
+    },
+    {
+      "source": "-1001000000005", "source_hash": 5555555555555555555,
+      "dest":   "-1002000000005", "dest_hash": 0,
+      "exclude": ["General"]
+    }
+  ],
+
+  "pairs": [
+    {"source":"-1001000000002", "source_hash":2222222222222222222, "dest":"-1002000000002", "dest_hash":0},
+    {"source":"-1001000000003", "source_hash":3333333333333333333, "dest":"-1002000000003", "dest_hash":0},
+    {"source":"-1001000000004", "source_hash":4444444444444444444, "dest":"-1002000000004", "dest_hash":0}
+  ]
+}
+```
+
+This expands to 8 ChatPairs at startup (2 from A's auto block + 3 from E's auto block + 3 explicit). See `configs/mixed.example.json` for the runnable template.
+
+---
+
+## 7. Forwarding — CLI flags (alternative)
+
+Same thing, just without the config file. Useful for quick one-offs:
 
 ```bash
 docker compose run --rm forwarder forward \
+  -u 15e2b0 \
   -gid -1001234567890 -1009876543210 \
   -gh  1234567890123456789 9876543210987654321 \
   -mid -1005555555555 -1006666666666 \
-  -mh  5555555555555555555 6666666666666666666
+  -mh  0 0
 ```
 
 | flag | long form | meaning |
 |---|---|---|
+| `-u`   | `--user` | Short ID of the user account to listen with. Required unless `-c` is used and config has `user`. |
+| `-c`   | `--config` | Path to a JSON config file (alternative to all the per-pair flags). |
 | `-gid` | `--group_chat_id` | Source chat IDs (space-separated). |
-| `-gh`  | `--group_chat_hash` | Source access_hashes, **same order as `-gid`**. |
+| `-gh`  | `--group_chat_hash` | Source access_hashes, **same order as `-gid`**. `0` for basic groups. |
 | `-mid` | `--mapped_chat_id` | Destination chat IDs, **1:1 mapped to `-gid` by position**. |
-| `-mh`  | `--mapped_chat_hash` | Destination access_hashes, **same order as `-mid`**. |
+| `-mh`  | `--mapped_chat_hash` | Destination access_hashes (kept for symmetry; bot resolves its own at runtime). |
+| `-tid` | `--topic_id` | *Optional.* Per-pair source topic ids inside a forum supergroup (1:1 with `-gid`). `0` = no filter. Once you pass `-tid` at all, every position needs a value (even `0`). |
+| `-mtid` | `--mapped_topic_id` | *Optional.* Per-pair destination topic ids (1:1 with `-mid`). `0` = main feed. Same all-or-nothing rule as `-tid`. |
 
-So in the example above, messages from `-1001234567890` go to `-1005555555555`, and messages from `-1009876543210` go to `-1006666666666`.
+**Pairs are positional 1:1.** Position N across every list is one independent pair. Two `-gid`s with the same value are perfectly valid — they're two separate pairs that happen to share a source. So if community A has 2 topics you want, plain group B/C/D need no topics, and community E has 3 topics:
 
-### Run it as a long-running container
+```bash
+-gid <A> <A> <B> <C> <D> <E> <E> <E>
+-gh  <Ah> <Ah> <Bh> <Ch> <Dh> <Eh> <Eh> <Eh>
+-mid <dA> <dA> <dB> <dC> <dD> <dE> <dE> <dE>
+-mh  0 0 0 0 0 0 0 0
+-tid  <A_t1>  <A_t2>  0 0 0 <E_t1>  <E_t2>  <E_t3>
+-mtid <dA_t1> <dA_t2> 0 0 0 <dE_t1> <dE_t2> <dE_t3>
+```
 
-For production, edit `docker-compose.yml` and uncomment the `command:` block with your specific IDs/hashes, then:
+For non-topic positions you put `0` in `-tid` and `-mtid` to keep the lists the same length. This gets unwieldy fast — section 6 (config file) is much easier.
+
+---
+
+## 8. Run as a long-running service
+
+Edit `docker-compose.yml` and replace `command: ["--help"]` with your real invocation. Using a config file:
+
+```yaml
+    command: ["forward", "-c", "/app/configs/mixed.json"]
+```
+
+Then:
 
 ```bash
 docker compose up -d
-docker compose logs -f forwarder
+docker compose logs -f forwarder      # tail
 ```
 
----
+The container survives:
+- container crashes (`restart: unless-stopped`)
+- EC2 / host reboots (Docker is `enable --now`'d on the host)
+- your SSH session ending (it's detached)
 
-## 6. Kill the user session
+To change the forwarding topology later: edit the config in `./configs/`, then `docker compose restart forwarder`. No rebuild needed.
 
-Revokes the session on Telegram's side and removes local session files:
+### Multiple forwarders side by side — two options
+
+Two patterns ship in the repo. Pick whichever fits how you work; you can switch later.
+
+| | `forwarder.sh` (dynamic) | `docker-compose.users.yml` (static) |
+|---|---|---|
+| Where state lives | "Whatever containers happen to be running" | The compose file |
+| Add a user | Drop `configs/<id>.json`, run `start <id>` | Edit `docker-compose.users.yml`, append a service block, `up -d` |
+| Remove a user | `stop <id>` | Comment out the service, `up -d` |
+| Single source of truth | No | Yes |
+| Survives EC2 reboot | Yes (each container has `--restart unless-stopped`) | Yes (same) |
+| Reconciles on `up -d` | N/A | Yes — extra services get started, removed services get stopped |
+| Plays well with infra-as-code | No | Yes |
+| Best when | Iterating, shell-driven workflows, ad-hoc users | Production-ish, multi-user EC2, anything you want versioned |
+
+For an EC2 deployment that's meant to run unattended, **the static compose file is the right default.** The dynamic script is fine for local iteration.
+
+#### Option A — `forwarder.sh` (dynamic, ad-hoc)
+
+For more than one or two users, `forwarder.sh` runs one container per user from the same image compose builds. No per-user config in `docker-compose.yml`.
+
+**Convention:** name each user's config `configs/<short_id>.json`. The script keys off that.
 
 ```bash
-docker compose run --rm forwarder logout
+# One-time: build the image
+docker compose build
+
+# One-time per user: log in, then save their config
+docker compose run --rm forwarder login                    # prints short_id, e.g. 15e2b0
+nano configs/15e2b0.json                                   # define their pairs
+
+# Start, stop, tail logs, list:
+./forwarder.sh start 15e2b0
+./forwarder.sh logs  15e2b0                                # Ctrl+C exits the tail
+./forwarder.sh ps                                          # show all forwarder containers
+./forwarder.sh restart 15e2b0
+./forwarder.sh stop 15e2b0
+
+# Bulk operations
+./forwarder.sh start-all                                   # starts every configs/<id>.json
+./forwarder.sh stop-all
 ```
 
-After this, the next `forward` will fail until you `login` again.
+Each container is named `tg-forwarder-<short_id>`, has `--restart unless-stopped`, and shares the `/data/sessions` volume.
 
----
+#### Option B — `docker-compose.users.yml` (static, declarative)
 
-## Cloud deployment
-
-The image is a single-process, stateful (because of session files) container. Anywhere you can run a container with a persistent volume works.
-
-**AWS ECS (Fargate)**
-- Push the image to ECR.
-- Create a task definition with one container, env vars from Secrets Manager.
-- Attach an EFS volume mounted at `/data/sessions`.
-- For the one-time `login`, run the task with `command` overridden to `["login"]` from `aws ecs execute-command` or run it locally first against the EFS mount.
-
-**GCP Cloud Run / GKE**
-- Cloud Run jobs work for the long-running forwarder (set min instances = 1 if you don't want cold-stop), with a Filestore mount for sessions.
-- GKE: use a `Deployment` with a `PersistentVolumeClaim` mounted at `/data/sessions`, env vars via `Secret` + `envFrom`.
-
-**Anywhere else (single VM)**
-```bash
-docker compose up -d
-```
-The `./data/sessions` host directory is your persistent state — back it up if you care about not re-doing login.
-
----
-
-## Local development (without Docker)
+`docker-compose.users.yml` ships in the repo. It defines a `forwarder-base` template service plus per-user services that `extends` it. Each user is a service; you add users by appending a 4-line block.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env       # fill values
-export SESSION_DIR=./sessions   # override the default /data/sessions
-python -m src.main login
-python -m src.main list-groups
-python -m src.main forward -gid -100... -gh ... -mid -100... -mh ...
+# One-time: build the image (compose still owns the build)
+docker compose build
+
+# One-time per user: log in
+docker compose run --rm forwarder login                    # prints short_id, e.g. 15e2b0
+nano configs/15e2b0.json
+
+# Add a service block to docker-compose.users.yml for each user, then:
+docker compose -f docker-compose.users.yml up -d
+
+# Day-to-day
+docker compose -f docker-compose.users.yml ps
+docker compose -f docker-compose.users.yml logs -f forwarder-15e2b0
+docker compose -f docker-compose.users.yml restart forwarder-15e2b0
+docker compose -f docker-compose.users.yml down
 ```
+
+To avoid typing `-f docker-compose.users.yml` every time, add this to your shell:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.users.yml
+```
+
+After that, `docker compose up -d` brings everything up (including the multi-user services), and one-off commands like `docker compose run --rm forwarder login` keep working through the base file.
+
+A new user is one block:
+
+```yaml
+  forwarder-8a9bcf:
+    extends:
+      service: forwarder-base
+    container_name: tg-forwarder-8a9bcf
+    command: ["forward", "-c", "/app/configs/8a9bcf.json"]
+```
+
+Then `docker compose -f docker-compose.users.yml up -d` — compose reconciles, starting the new one without touching the others.
+
+Both options share `/data/sessions`, so `users.json` stays consistent and `login` only needs to happen once per user no matter which option you use.
+
+**To run a single user long-term** (the basic case, no multi-user setup at all), edit the `command:` in `docker-compose.yml` to point at one config and `docker compose up -d`. The two options above are only relevant when you want several users running concurrently.
 
 ---
 
-## How it works (short version)
+## 9. Cloud deployment
 
-- **User client** (your phone-number-authenticated session) listens for `NewMessage` events on each source chat. Only a real user account can listen to arbitrary chats it's a member of.
-- **Bot client** (the BotFather token) sends to each destination chat. Sending as the bot keeps your personal account out of the destination groups.
-- **Per-pair message-id map.** When the user client sees a new message, the forwarder records the source-id and the destination-id returned by the bot's send. When a future message in the source replies to an earlier one, the forwarder looks up the corresponding destination id and sets `reply_to` so it shows as a reply in the destination too.
-- **Media.** Downloaded as bytes via the user client (which has access), then re-uploaded via the bot. Sender hints (`voice_note=True`, `video_note=True`, filename attributes) are set so the destination renders the right widget.
-- **Polls.** Telegram polls are bound to a sender, so the original `Poll` can't be re-sent verbatim. The forwarder reconstructs an equivalent poll (question, options, multiple-choice / quiz / public-voters / close behavior) and sends it via `InputMediaPoll`.
+The image is a single-process container with stateful sessions on disk. Anywhere you can run a container with a persistent volume works.
+
+**AWS EC2 (simplest):** `docker compose up -d` on a `t3.micro`. Bind-mounted `./data/sessions` is your state.
+
+**AWS ECS (Fargate):** push the image to ECR, attach an EFS volume mounted at `/data/sessions`. Don't run more than one task pointed at the same EFS — the SQLite session files only support a single writer.
+
+**GCP Cloud Run / GKE:** Cloud Run with min-instances=1 and a Filestore mount, or GKE `Deployment` + `PersistentVolumeClaim` on `/data/sessions`. Env vars from a `Secret`.
+
+For the EC2 path step-by-step, see the deployment notes in commit history — short version: install Docker via cloud-init user-data, scp the project zip up, `docker compose up -d`.
+
+---
+
+## 10. How catch-up works
+
+Every successfully forwarded message advances a per-pair counter in `forward_state.json`:
+
+```
+forward_state["<short_id>:<source_id>:<dest_id>"]            = last_msg_id   # non-topic pair
+forward_state["<short_id>:<source_id>:<dest_id>:<topic_id>"] = last_msg_id   # topic-filtered pair
+```
+
+On startup, for every pair:
+
+1. **First-ever run** (no entry in state): query the latest message in scope (the chat as a whole, or the topic if filtered), record its id as the baseline. **No backfill.** Future runs only catch up missed messages from this point.
+2. **Subsequent runs:** call `iter_messages(min_id=last_seen, reply_to=topic_id_if_any)`, reverse to chronological order, forward each via the bot. State is saved after every successful forward. If a forward fails mid-catch-up, state is *not* advanced past the failed message — the next run retries from the same point.
+
+Then the live listener attaches. Any incoming message with `id <= state[key]` is dropped (covers the brief overlap between catch-up finishing and the listener starting).
+
+---
+
+## 11. How it works (architecture)
+
+- **User client** (one of your phone-number-authenticated sessions, selected by `-u` or by the config's `user`) listens for `NewMessage` events on each source.
+- **Bot client** (the BotFather token from `.env`) sends to each destination. The user account never appears in destination groups.
+- **Per-account access hashes.** Telegram access_hashes are per-account. The user uses its own hash for source supergroups. The bot always re-resolves its destination via `get_entity` so it gets the bot's own hash — that's why `dest_hash` is informational only.
+- **Topic filtering on source.** A message belongs to topic T if its `reply_to.reply_to_top_id == T` or `reply_to.reply_to_msg_id == T` (the topic's root message). Catch-up uses Telethon's `iter_messages(reply_to=T)`.
+- **Topic routing on destination.** Posting into topic T means setting `reply_to=T` on the outgoing message. The forwarder uses `dest_topic_id` as the default `reply_to` for top-level messages. Replies to messages we've already forwarded use the mapped reply id instead (so threads stay intact within the topic).
+- **Media handoff.** Photos/videos/documents/voice etc. are downloaded by the user client (which has access to the source) and re-uploaded by the bot (which has access to the destination). Polls are reconstructed (the original `Poll` is bound to the source chat's poll id).
+- **Reply mapping** is in-memory (per-pair `msg_id_map`). Replies to messages from a previous process lifetime aren't linked — they send as standalone messages (or land in the configured destination topic).
 
 ---
 
 ## Limitations
 
-- Stickers are forwarded as `.webp` files; bots have restricted sticker-send capabilities and can't always reproduce a sticker exactly.
+- Stickers are forwarded as `.webp` files; bots have restricted sticker-send capabilities.
 - Service messages (joins, pins, etc.) are skipped.
 - Edits and deletions in the source aren't propagated — only `NewMessage` is handled.
-- The bot must be a member of every destination chat (and have permission to post).
+- Reply mapping is in-memory; replies in live messages that point to messages from a previous process lifetime aren't linked.
+- The bot must be a member of every destination chat with permission to post (and **Manage Topics** if you're posting into specific topics).
 
 ---
 
 ## Troubleshooting
 
-- **"User session not authorized."** Run `login` first. If you've cleared `./data/sessions/`, you'll need to log in again.
-- **`PEER_ID_INVALID` from the bot.** The bot isn't in that destination chat, or you have the wrong access_hash. Re-run `list-groups` from a session that's a member of the destination, or add the bot and re-check.
-- **Login asks again every time.** Make sure `./data/sessions` is actually mounted into the container. `docker compose config` will show the resolved volumes.
-- **2FA never prompted but you have 2FA on.** You're not running with `-it`. Use `docker compose run --rm forwarder login` (not `exec`, not background `up`).
+- **`No user with short id '…'`** — run `list-users` to see registered users; `login` if needed.
+- **`User <id> session not authorized`** — session was revoked or deleted. Run `login` again for that account.
+- **`Bot could not resolve dest chat`** — the bot isn't in the destination, or doesn't have permission. Add it manually first.
+- **Login asks again every time** — make sure `./data/sessions` is mounted into the container. `docker compose config` shows resolved volumes.
+- **2FA never prompted but you have 2FA on** — you're not running with `-it`. Use `docker compose run --rm forwarder login` (not `exec`, not background `up`).
+- **`compose build requires buildx 0.17.0 or later`** — install Docker buildx as a CLI plugin on the host: `mkdir -p /usr/local/lib/docker/cli-plugins && curl -SL "https://github.com/docker/buildx/releases/latest/download/buildx-$(curl -s https://api.github.com/repos/docker/buildx/releases/latest | grep tag_name | cut -d\\\" -f4).linux-amd64" -o /usr/local/lib/docker/cli-plugins/docker-buildx && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx`.
+- **`ImportError: cannot import name 'GetForumTopicsRequest' from 'telethon.tl.functions.channels'`** — your Telethon build moved this RPC to the `messages` module. The code already falls back automatically; if you still see this error, upgrade Telethon: `pip install -U telethon` (or rebuild the image).
+- **`auto` block resolves to fewer pairs than expected** — title mismatch between source and destination. Run `list-topics` on both and compare; rename, or use `pairs` with explicit ids.
