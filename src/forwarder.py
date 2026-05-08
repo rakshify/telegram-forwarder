@@ -96,15 +96,31 @@ async def forward_pairs(short_id: str, pairs: List[ChatPair]) -> None:
 
     await bot_client.start(bot_token=config.BOT_TOKEN)
 
+    # Some entities (basic groups, never-opened communities) require the
+    # session's entity cache to be primed before get_entity will succeed.
+    # iter_dialogs walks every chat the account is in and populates that
+    # cache as a side effect.
+    user_primed = {"done": False}
+    bot_primed = {"done": False}
+
+    async def _prime(client, primed_state):
+        if primed_state["done"]:
+            return
+        async for _ in client.iter_dialogs():
+            pass
+        primed_state["done"] = True
+
     # Resolve every endpoint to a usable peer for the relevant client
     for pair in pairs:
         pair.source_peer = await _resolve_peer(
             user_client, pair.source_id, pair.source_hash,
             role="source", for_bot=False,
+            prime=lambda: _prime(user_client, user_primed),
         )
         pair.dest_peer = await _resolve_peer(
             bot_client, pair.dest_id, pair.dest_hash,
             role="dest", for_bot=True,
+            prime=lambda: _prime(bot_client, bot_primed),
         )
 
     # Catch up missed messages for every pair before going live
@@ -134,6 +150,7 @@ async def _resolve_peer(
     access_hash: int,
     role: str,
     for_bot: bool,
+    prime=None,
 ):
     """Return a usable input-peer for `client`.
 
@@ -148,11 +165,27 @@ async def _resolve_peer(
         the session gets the bot's own access_hash. This works uniformly for
         supergroups, channels, and basic groups. The user-provided -mh value
         is accepted by the CLI for symmetry with -gh but ignored at runtime.
+
+    `prime` is an optional async callable that primes the client's entity
+    cache via iter_dialogs. We call it on demand the first time get_entity
+    fails — saves the cost on subsequent lookups.
     """
+    async def _get_with_prime(marked):
+        try:
+            return await client.get_entity(marked)
+        except Exception as first_error:
+            if prime is None:
+                raise
+            await prime()
+            try:
+                return await client.get_entity(marked)
+            except Exception:
+                raise first_error  # surface the original error message
+
     if for_bot:
         marked = -chat_id if access_hash == 0 else int(f"-100{chat_id}")
         try:
-            return await client.get_entity(marked)
+            return await _get_with_prime(marked)
         except Exception as e:
             raise SystemExit(
                 f"Bot could not resolve {role} chat (id={chat_id}): {e}\n"
@@ -164,7 +197,7 @@ async def _resolve_peer(
         return InputPeerChannel(channel_id=chat_id, access_hash=access_hash)
 
     try:
-        return await client.get_entity(-chat_id)
+        return await _get_with_prime(-chat_id)
     except Exception as e:
         raise SystemExit(
             f"Could not resolve basic-group {role} chat_id={chat_id} on the user session: {e}\n"

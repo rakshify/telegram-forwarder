@@ -126,6 +126,27 @@ async def _expand_auto_blocks(
     expanded: List[ChatPair] = []
     common_kwargs = dict(offset_date=None, offset_id=0, offset_topic=0, limit=100)
 
+    # Telethon caches entity → access_hash mappings in the session SQLite. If a
+    # community we're targeting was never opened on this session before,
+    # get_entity(-100<id>) fails with "Could not find the input entity".
+    # iter_dialogs() walks every chat the user is in and populates that cache
+    # as a side effect. We prime once, lazily, only if needed.
+    primed = False
+
+    async def _resolve(marked_id: int):
+        nonlocal primed
+        try:
+            return await client.get_entity(marked_id)
+        except (ValueError, Exception):
+            if primed:
+                raise
+            print(f"  priming session cache (first lookup of "
+                  f"{marked_id} on this session)...")
+            async for _ in client.iter_dialogs():
+                pass
+            primed = True
+            return await client.get_entity(marked_id)
+
     try:
         for i, block in enumerate(blocks):
             try:
@@ -143,10 +164,14 @@ async def _expand_auto_blocks(
             dst_marked = int(f"-100{parse_chat_id(dst_id_raw)}")
 
             try:
-                src_ent = await client.get_entity(src_marked)
-                dst_ent = await client.get_entity(dst_marked)
+                src_ent = await _resolve(src_marked)
+                dst_ent = await _resolve(dst_marked)
             except Exception as e:
-                raise SystemExit(f"auto[{i}]: could not resolve communities: {e}")
+                raise SystemExit(
+                    f"auto[{i}]: could not resolve communities even after priming "
+                    f"the session cache: {e}\n"
+                    f"Make sure the user account is a member of both communities."
+                )
 
             for ent, label in ((src_ent, "source"), (dst_ent, "dest")):
                 if not (isinstance(ent, Channel) and getattr(ent, "forum", False)):

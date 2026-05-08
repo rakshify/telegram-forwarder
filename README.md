@@ -30,6 +30,11 @@ telegram-forwarder/
 ├── requirements.txt
 ├── .env.example
 ├── README.md
+├── deploy/                               # AWS deployment runbook + PowerShell automation
+│   ├── README.md
+│   ├── deploy-aws.ps1
+│   ├── load-deployment.ps1
+│   └── teardown-aws.ps1
 ├── configs/                              # bind-mounted to /app/configs
 │   ├── README.md
 │   ├── simple.example.json
@@ -399,7 +404,7 @@ Each container is named `tg-forwarder-<short_id>`, has `--restart unless-stopped
 
 #### Option B — `docker-compose.users.yml` (static, declarative)
 
-`docker-compose.users.yml` ships in the repo. It defines a `forwarder-base` template service plus per-user services that `extends` it. Each user is a service; you add users by appending a 4-line block.
+`docker-compose.users.yml` ships in the repo. It uses a YAML anchor to define the shared service configuration once, then expands it into per-user services. Each user is a service; you add users by appending a 4-line block.
 
 ```bash
 # One-time: build the image (compose still owns the build)
@@ -431,13 +436,12 @@ A new user is one block:
 
 ```yaml
   forwarder-8a9bcf:
-    extends:
-      service: forwarder-base
+    <<: *forwarder
     container_name: tg-forwarder-8a9bcf
     command: ["forward", "-c", "/app/configs/8a9bcf.json"]
 ```
 
-Then `docker compose -f docker-compose.users.yml up -d` — compose reconciles, starting the new one without touching the others.
+The `<<: *forwarder` line is a YAML anchor reference that expands the shared image/env_file/volumes/restart fields at file-load time. It's a pure YAML feature, not a compose feature. Then `docker compose -f docker-compose.users.yml up -d` — compose reconciles, starting the new one without touching the others.
 
 Both options share `/data/sessions`, so `users.json` stays consistent and `login` only needs to happen once per user no matter which option you use.
 
@@ -449,13 +453,17 @@ Both options share `/data/sessions`, so `users.json` stays consistent and `login
 
 The image is a single-process container with stateful sessions on disk. Anywhere you can run a container with a persistent volume works.
 
-**AWS EC2 (simplest):** `docker compose up -d` on a `t3.micro`. Bind-mounted `./data/sessions` is your state.
+**AWS EC2 (simplest, recommended for this project):** an end-to-end Windows-driven runbook plus PowerShell automation lives in [`deploy/`](./deploy/README.md). One script provisions a `t3.micro` with Docker pre-installed, saves the SSH key and deployment metadata to a folder you specify; a companion script reloads everything in a fresh shell and provides `Connect-Forwarder` / `Start-Forwarder` / `Stop-Forwarder` helpers.
+
+```powershell
+# Quick provision (full guide in deploy/README.md)
+cd deploy
+.\deploy-aws.ps1 -OutputFolder C:\Users\you\tg-forwarder-aws
+```
 
 **AWS ECS (Fargate):** push the image to ECR, attach an EFS volume mounted at `/data/sessions`. Don't run more than one task pointed at the same EFS — the SQLite session files only support a single writer.
 
 **GCP Cloud Run / GKE:** Cloud Run with min-instances=1 and a Filestore mount, or GKE `Deployment` + `PersistentVolumeClaim` on `/data/sessions`. Env vars from a `Secret`.
-
-For the EC2 path step-by-step, see the deployment notes in commit history — short version: install Docker via cloud-init user-data, scp the project zip up, `docker compose up -d`.
 
 ---
 

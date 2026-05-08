@@ -9,9 +9,10 @@
 #   1. Build the image (compose still owns the build):
 #        docker compose build
 #      (yes, plain `docker compose build` — it reads ./docker-compose.yml,
-#      which keeps the build context. This file reuses that image.)
+#      which has the `build: .` directive. This file reuses that image.)
 #
-#   2. For one-off operations (login, list-users, etc.) keep using compose:
+#   2. For one-off operations (login, list-users, etc.) keep using the
+#      base file:
 #        docker compose run --rm forwarder login
 #
 #   3. Edit the per-user services below for your real users and configs.
@@ -23,39 +24,46 @@
 #        docker compose -f docker-compose.users.yml restart forwarder-15e2b0
 #        docker compose -f docker-compose.users.yml down
 #
-# Tip: put `export COMPOSE_FILE=docker-compose.yml:docker-compose.users.yml`
+# Tip: `export COMPOSE_FILE=docker-compose.yml:docker-compose.users.yml`
 # in your shell to make `docker compose` commands transparently use both.
 #
 # All services share /data/sessions, so users.json stays consistent and
 # `login` is a one-time-per-user operation regardless of how many forwarders
 # are defined.
+#
+# ----------------------------------------------------------------------------
+# About the YAML `&forwarder` anchor below: it's a YAML-level shorthand.
+# `<<: *forwarder` in a service block expands at file-load time to all the
+# fields under the anchor, so each per-user service gets the same image,
+# env_file, volumes, and restart policy. This keeps you from having to
+# repeat them per service. It is a YAML feature, not a compose feature —
+# every modern compose version handles it natively.
+
+x-forwarder: &forwarder
+  image: telegram-forwarder:latest
+  env_file: .env
+  volumes:
+    - ./data/sessions:/data/sessions
+    - ./configs:/app/configs:ro
+  restart: unless-stopped
 
 services:
-  # Template service — held back from `up` by `profiles: [never]`. Per-user
-  # services below `extends` from this. Edit volumes/env here once and every
-  # forwarder picks it up.
-  forwarder-base:
-    image: telegram-forwarder:latest
-    env_file: .env
-    volumes:
-      - ./data/sessions:/data/sessions
-      - ./configs:/app/configs:ro
-    # profiles: ["never"]   # template only; never starts on its own
-    restart: unless-stopped
-
   # ============================================================
   # Per-user services. Add one block per user.
   # Convention: configs/<short_id>.json on the host.
   # ============================================================
 
-  # forwarder-15e2b0:
-  #   extends:
-  #     service: forwarder-base
-  #   container_name: tg-forwarder-15e2b0
-  #   command: ["forward", "-c", "/app/configs/15e2b0.json"]
+  forwarder-15e2b0:
+    <<: *forwarder
+    container_name: tg-forwarder-15e2b0
+    command: ["forward", "-c", "/app/configs/15e2b0.json"]
 
   # forwarder-8a9bcf:
-  #   extends:
-  #     service: forwarder-base
+  #   <<: *forwarder
   #   container_name: tg-forwarder-8a9bcf
   #   command: ["forward", "-c", "/app/configs/8a9bcf.json"]
+
+  # forwarder-90b912:
+  #   <<: *forwarder
+  #   container_name: tg-forwarder-90b912
+  #   command: ["forward", "-c", "/app/configs/90b912.json"]
