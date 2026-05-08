@@ -53,10 +53,10 @@ services:
   # Convention: configs/<short_id>.json on the host.
   # ============================================================
 
-  forwarder-15e2b0:
+  forwarder-tanu:
     <<: *forwarder
-    container_name: tg-forwarder-15e2b0
-    command: ["forward", "-c", "/app/configs/15e2b0.json"]
+    container_name: tg-forwarder-tanu
+    command: ["forward", "-c", "/app/configs/90b912.json"]
 
   # forwarder-8a9bcf:
   #   <<: *forwarder
