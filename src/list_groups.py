@@ -99,12 +99,20 @@ async def list_topics(short_id: str, parent_id_str: str) -> None:
         return
 
     parent_id = parse_chat_id(parent_id_str)
+    marked = int(f"-100{parent_id}")
     try:
-        entity = await client.get_entity(int(f"-100{parent_id}"))
-    except Exception as e:
-        print(f"Could not resolve parent supergroup -100{parent_id}: {e}")
-        await client.disconnect()
-        return
+        entity = await client.get_entity(marked)
+    except Exception:
+        # Cold session cache — prime it once and retry.
+        print("  priming session cache (first lookup on this session)...")
+        async for _ in client.iter_dialogs():
+            pass
+        try:
+            entity = await client.get_entity(marked)
+        except Exception as e:
+            print(f"Could not resolve parent supergroup -100{parent_id}: {e}")
+            await client.disconnect()
+            return
 
     if not isinstance(entity, Channel) or not getattr(entity, "forum", False):
         print(f"{entity.title!r} is not a forum-enabled supergroup (no topics).")
@@ -186,9 +194,27 @@ async def clone_topics(short_id: str, src_id_str: str, dst_id_str: str) -> None:
         await client.disconnect()
         return
 
+    src_marked = int(f"-100{parse_chat_id(src_id_str)}")
+    dst_marked = int(f"-100{parse_chat_id(dst_id_str)}")
+
+    primed = False
+
+    async def _resolve(marked):
+        nonlocal primed
+        try:
+            return await client.get_entity(marked)
+        except Exception:
+            if primed:
+                raise
+            print("  priming session cache (first lookup on this session)...")
+            async for _ in client.iter_dialogs():
+                pass
+            primed = True
+            return await client.get_entity(marked)
+
     try:
-        src = await client.get_entity(int(f"-100{parse_chat_id(src_id_str)}"))
-        dst = await client.get_entity(int(f"-100{parse_chat_id(dst_id_str)}"))
+        src = await _resolve(src_marked)
+        dst = await _resolve(dst_marked)
     except Exception as e:
         print(f"Could not resolve communities: {e}")
         await client.disconnect()
