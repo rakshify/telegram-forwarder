@@ -420,46 +420,88 @@ async def _forward_one(
         )
 
     # 2) Media (photo, video, audio, voice, video-note, sticker, gif, document).
+    #    Download to a tempfile (with the right extension) so Telethon's
+    #    server-side type detection works correctly, then re-upload via the
+    #    bot. Passing raw bytes via file=<bytes> leaves Telegram unable to
+    #    classify the upload and you end up with "tap to download" tiles
+    #    instead of inline previews.
     elif msg.media and not isinstance(msg.media, MessageMediaWebPage):
-        file_bytes = await msg.download_media(file=bytes)
-        if file_bytes:
-            caption_text = msg.message or ""
-            caption_entities = msg.entities
-            if pair.attribution:
-                caption_text, caption_entities = _format_attribution(
-                    msg, caption_text, caption_entities
-                )
-            send_kwargs = dict(
-                entity=pair.dest_peer,
-                file=file_bytes,
-                caption=caption_text,
-                reply_to=reply_to,
-                formatting_entities=caption_entities,
-            )
-            if msg.voice:
-                send_kwargs["voice_note"] = True
-            elif msg.video_note:
-                send_kwargs["video_note"] = True
-            elif msg.gif:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="animation.mp4")]
-            elif msg.photo:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="image.png")]
-            elif msg.sticker:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="sticker.webp")]
-            elif msg.video:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="video.mp4")]
-            elif msg.audio:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="audio.mp3")]
-            elif msg.document:
-                fname = next(
-                    (a.file_name for a in msg.document.attributes
-                     if isinstance(a, DocumentAttributeFilename)),
-                    None,
-                )
-                if fname:
-                    send_kwargs["attributes"] = [DocumentAttributeFilename(file_name=fname)]
+        import os
+        import tempfile
 
-            sent = await bot_client.send_file(**send_kwargs)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # download_media with a directory path lets Telethon pick the
+            # right filename + extension for us based on the media type.
+            downloaded = await msg.download_media(file=tmpdir)
+            if not downloaded:
+                pass  # nothing to forward (e.g. unsupported media type)
+            else:
+                caption_text = msg.message or ""
+                caption_entities = msg.entities
+                if pair.attribution:
+                    caption_text, caption_entities = _format_attribution(
+                        msg, caption_text, caption_entities
+                    )
+                send_kwargs = dict(
+                    entity=pair.dest_peer,
+                    file=downloaded,    # path with proper extension
+                    caption=caption_text,
+                    reply_to=reply_to,
+                    formatting_entities=caption_entities,
+                )
+
+                if msg.voice:
+                    # Voice notes: small audio bubble with waveform + play button.
+                    send_kwargs["voice_note"] = True
+                elif msg.video_note:
+                    # Round video bubble.
+                    send_kwargs["video_note"] = True
+                elif msg.photo:
+                    # Inline photo with preview. The .jpg extension on the
+                    # downloaded path lets Telethon route this through the
+                    # photo upload path rather than treating it as a document.
+                    send_kwargs["force_document"] = False
+                elif msg.gif:
+                    # Animation — mp4 bytes recognized as a GIF when video=True
+                    # and force_document=False is set.
+                    send_kwargs["video"] = True
+                    send_kwargs["force_document"] = False
+                elif msg.video:
+                    # Inline video with thumbnail + scrubber. supports_streaming
+                    # lets Telegram start playback before download finishes.
+                    send_kwargs["video"] = True
+                    send_kwargs["supports_streaming"] = True
+                    send_kwargs["force_document"] = False
+                elif msg.audio:
+                    # Music-style audio player (rather than a generic file tile).
+                    send_kwargs["force_document"] = False
+                    # Preserve original title/performer/duration if present.
+                    from telethon.tl.types import DocumentAttributeAudio
+                    audio_attr = next(
+                        (a for a in msg.document.attributes
+                         if isinstance(a, DocumentAttributeAudio)),
+                        None,
+                    )
+                    if audio_attr is not None:
+                        send_kwargs["attributes"] = [audio_attr]
+                elif msg.sticker:
+                    # Bots have limited sticker-send capability; fall back to
+                    # webp file. Known limitation.
+                    pass  # filename from download already ends in .webp
+                elif msg.document:
+                    # Generic document — preserve original filename so the
+                    # destination shows the right extension and icon.
+                    fname = next(
+                        (a.file_name for a in msg.document.attributes
+                         if isinstance(a, DocumentAttributeFilename)),
+                        None,
+                    )
+                    if fname:
+                        send_kwargs["attributes"] = [
+                            DocumentAttributeFilename(file_name=fname)
+                        ]
+
+                sent = await bot_client.send_file(**send_kwargs)
 
     # 3) Plain text (covers text-only messages and text-with-link-preview).
     if sent is None:
