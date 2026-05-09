@@ -85,7 +85,7 @@ async def forward_pairs(short_id: str, pairs: List[ChatPair]) -> None:
         str(record.session_base), config.api_id_int(), config.TG_API_HASH
     )
     bot_client = TelegramClient(
-        str(config.BOT_SESSION_PATH), config.api_id_int(), config.TG_API_HASH
+        str(config.bot_session_path(short_id)), config.api_id_int(), config.TG_API_HASH
     )
 
     await user_client.connect()

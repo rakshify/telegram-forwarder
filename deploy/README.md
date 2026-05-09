@@ -75,7 +75,7 @@ cd <path-to-your-cloned-telegram-forwarder>\deploy
 
 # Provision an EC2 instance.
 # OutputFolder is where the .pem and deployment-info.txt will be saved.
-.\deploy-aws.ps1 -OutputFolder C:\Users\you\tg-forwarder-aws
+.\deploy-aws.ps1 -OutputFolder C:\Users\me\tg-forwarder-aws
 ```
 
 What this does:
@@ -93,7 +93,7 @@ When it finishes, you'll see something like:
 ```
 [+] Deployment complete.
 
-  ssh -i "C:\Users\you\tg-forwarder-aws\tg-forwarder-key.pem" ec2-user@54.123.45.67
+  ssh -i "C:\Users\me\tg-forwarder-aws\tg-forwarder-key.pem" ec2-user@203.0.113.42
 ```
 
 The `deployment-info.txt` file in `OutputFolder` looks like this:
@@ -103,15 +103,15 @@ REGION         = us-east-1
 INSTANCE_ID    = i-0abcdef1234567890
 INSTANCE_TYPE  = t3.micro
 KEY_NAME       = tg-forwarder-key
-KEY_PATH       = C:\Users\you\tg-forwarder-aws\tg-forwarder-key.pem
+KEY_PATH       = C:\Users\me\tg-forwarder-aws\tg-forwarder-key.pem
 SG_NAME        = tg-forwarder-sg
 SG_ID          = sg-0abcdef1234567890
 AMI_ID         = ami-...
 INSTANCE_TAG   = tg-forwarder
 DEPLOYED_AT    = 2026-05-06 14:32:11 -07:00
-DEPLOYED_FROM_IP = 73.x.x.x
+DEPLOYED_FROM_IP = 198.51.100.7
 
-PUBLIC_IP      = 54.123.45.67
+PUBLIC_IP      = 203.0.113.42
 ```
 
 **Save this folder.** Losing the .pem means rebuilding the instance (see "Recovery" at the bottom).
@@ -125,7 +125,7 @@ PUBLIC_IP      = 54.123.45.67
 Any time you open a new PowerShell window and want to work with the instance:
 
 ```powershell
-. .\load-deployment.ps1 -InfoFile C:\Users\you\tg-forwarder-aws\deployment-info.txt
+. .\load-deployment.ps1 -InfoFile C:\Users\me\tg-forwarder-aws\deployment-info.txt
 ```
 
 The leading `.` is mandatory (PowerShell "dot-source" — runs the script in your current shell so the env vars and functions stick around).
@@ -143,7 +143,7 @@ It sets `$env:REGION`, `$env:INSTANCE_ID`, `$env:KEY_PATH`, etc., and defines fo
 Typical first SSH-in:
 
 ```powershell
-. .\load-deployment.ps1 -InfoFile C:\Users\you\tg-forwarder-aws\deployment-info.txt
+. .\load-deployment.ps1 -InfoFile C:\Users\me\tg-forwarder-aws\deployment-info.txt
 Connect-Forwarder
 ```
 
@@ -208,7 +208,7 @@ docker compose run --rm forwarder login
 # Phone number, OTP, optional 2FA
 ```
 
-The output prints a `short_id` (e.g. `15e2b0`) — note this. Repeat `login` for each Telegram account you want to use as a source listener.
+The output prints a `short_id` (e.g. `aaaa11`) — note this. Repeat `login` for each Telegram account you want to use as a source listener.
 
 ```bash
 docker compose run --rm forwarder list-users
@@ -219,9 +219,9 @@ docker compose run --rm forwarder list-users
 By convention, name each user's config `configs/<short_id>.json`:
 
 ```bash
-cp configs/mixed.example.json configs/15e2b0.json
-nano configs/15e2b0.json
-# Replace REPLACE_WITH_SHORT_ID with 15e2b0, fill in real chat ids/hashes
+cp configs/mixed.example.json configs/aaaa11.json
+nano configs/aaaa11.json
+# Replace REPLACE_WITH_SHORT_ID with aaaa11, fill in real chat ids/hashes
 ```
 
 See the project's main `README.md` (sections 6–7) for the full schema. The example files in `configs/` are templates.
@@ -233,7 +233,7 @@ Two patterns — the project's main README §8 covers both in detail. Short vers
 **One user, long-running** — edit `command:` in `docker-compose.yml`:
 
 ```yaml
-    command: ["forward", "-c", "/app/configs/15e2b0.json"]
+    command: ["forward", "-c", "/app/configs/aaaa11.json"]
 ```
 
 Then:
@@ -262,7 +262,7 @@ You can `exit` your SSH session — the bot keeps forwarding.
 ### Check what's happening
 
 ```powershell
-. .\load-deployment.ps1 -InfoFile C:\Users\you\tg-forwarder-aws\deployment-info.txt
+. .\load-deployment.ps1 -InfoFile C:\Users\me\tg-forwarder-aws\deployment-info.txt
 Connect-Forwarder
 ```
 
@@ -360,7 +360,7 @@ If even that fails (Instance Connect is somehow disabled), the only path left is
 When you're done with the project entirely:
 
 ```powershell
-.\teardown-aws.ps1 -InfoFile C:\Users\you\tg-forwarder-aws\deployment-info.txt
+.\teardown-aws.ps1 -InfoFile C:\Users\me\tg-forwarder-aws\deployment-info.txt
 ```
 
 Asks for confirmation, then terminates the instance, deletes the security group, deletes the key pair, and removes the local .pem and info file.
@@ -370,7 +370,7 @@ Asks for confirmation, then terminates the instance, deletes the security group,
 To keep the local files (in case you want them as a record):
 
 ```powershell
-.\teardown-aws.ps1 -InfoFile C:\Users\you\tg-forwarder-aws\deployment-info.txt -KeepLocalFiles
+.\teardown-aws.ps1 -InfoFile C:\Users\me\tg-forwarder-aws\deployment-info.txt -KeepLocalFiles
 ```
 
 ---

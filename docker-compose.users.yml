@@ -20,8 +20,8 @@
 #
 #   4. Bring everything up:
 #        docker compose -f docker-compose.users.yml up -d
-#        docker compose -f docker-compose.users.yml logs -f forwarder-15e2b0
-#        docker compose -f docker-compose.users.yml restart forwarder-15e2b0
+#        docker compose -f docker-compose.users.yml logs -f forwarder-aaaa11
+#        docker compose -f docker-compose.users.yml restart forwarder-aaaa11
 #        docker compose -f docker-compose.users.yml down
 #
 # Tip: `export COMPOSE_FILE=docker-compose.yml:docker-compose.users.yml`
@@ -53,17 +53,7 @@ services:
   # Convention: configs/<short_id>.json on the host.
   # ============================================================
 
-  forwarder-tanu:
-    <<: *forwarder
-    container_name: tg-forwarder-tanu
-    command: ["forward", "-c", "/app/configs/90b912.json"]
-
-  # forwarder-8a9bcf:
+  # forwarder-cccc33:
   #   <<: *forwarder
-  #   container_name: tg-forwarder-8a9bcf
-  #   command: ["forward", "-c", "/app/configs/8a9bcf.json"]
-
-  # forwarder-90b912:
-  #   <<: *forwarder
-  #   container_name: tg-forwarder-90b912
-  #   command: ["forward", "-c", "/app/configs/90b912.json"]
+  #   container_name: tg-forwarder-cccc33
+  #   command: ["forward", "-c", "/app/configs/cccc33.json"]
