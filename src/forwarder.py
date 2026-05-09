@@ -31,6 +31,8 @@ from telethon.tl.types import (
     DocumentAttributeFilename,
     MessageMediaPoll,
     MessageMediaWebPage,
+    MessageEntityBold,
+    User,
 )
 
 from . import config, state, users
@@ -50,6 +52,10 @@ class ChatPair:
     `dest_topic_id` of 0 means "post in the destination's main feed". Any
     other value posts inside that destination topic (the destination must be
     a forum-enabled supergroup, and the topic must already exist).
+
+    `attribution` controls whether each forwarded message is prefixed with
+    the source sender's name (and @username, when present). Off by default
+    so the original behavior is unchanged.
     """
     source_id: int
     source_hash: int
@@ -57,6 +63,7 @@ class ChatPair:
     dest_hash: int
     topic_id: int = 0
     dest_topic_id: int = 0
+    attribution: bool = False
     source_peer: Optional[object] = None
     dest_peer: Optional[object] = None
     msg_id_map: Dict[int, int] = field(default_factory=dict)
@@ -308,6 +315,67 @@ def _register_handler(
                   f"error on msg {mid}: {e}")
 
 
+# ------------------------------------------------------------------ attribution
+
+def _sender_display(sender) -> str:
+    """Render a sender as 'First Last (@username)' / 'First (@username)' /
+    'First Last' / 'First' / '(unknown user)' depending on what's available.
+    """
+    if sender is None:
+        return "(unknown user)"
+    if not isinstance(sender, User):
+        # Channel posts, anonymous admin posts, etc. — use the chat title.
+        title = getattr(sender, "title", None)
+        return title or "(unknown sender)"
+
+    parts = [p for p in (sender.first_name, sender.last_name) if p]
+    name = " ".join(parts) if parts else None
+
+    if name and sender.username:
+        return f"{name} (@{sender.username})"
+    if name:
+        return name
+    if sender.username:
+        return f"@{sender.username}"
+    return "(unknown user)"
+
+
+def _format_attribution(msg: Message, original_text: str, original_entities):
+    """Return (text, entities) with a bolded sender prefix prepended.
+
+    Used when pair.attribution is True. The prefix renders as:
+
+        Alex Doe (@alex_doe):
+        <blank line>
+        <original text>
+
+    All of the original entities (bold/italic/links/etc.) are preserved by
+    cloning each one with a shifted offset. We copy rather than mutate so
+    re-using the same source message in another pair stays safe.
+    """
+    import copy
+
+    sender = msg.sender                # populated by Telethon when the message arrives
+    display = _sender_display(sender)
+    prefix = f"{display}:\n\n"
+    new_text = prefix + (original_text or "")
+
+    # Bold the name portion only — everything up to (but not including) the colon.
+    name_len = len(display)
+    new_entities = [MessageEntityBold(offset=0, length=name_len)]
+
+    # Shift original entities by the prefix length so they still cover the
+    # right slice of new_text. copy.copy is enough — entities are flat objects.
+    if original_entities:
+        prefix_len = len(prefix)
+        for ent in original_entities:
+            shifted = copy.copy(ent)
+            shifted.offset = ent.offset + prefix_len
+            new_entities.append(shifted)
+
+    return new_text, new_entities
+
+
 # ------------------------------------------------------------------ the actual send
 
 async def _forward_one(
@@ -355,12 +423,18 @@ async def _forward_one(
     elif msg.media and not isinstance(msg.media, MessageMediaWebPage):
         file_bytes = await msg.download_media(file=bytes)
         if file_bytes:
+            caption_text = msg.message or ""
+            caption_entities = msg.entities
+            if pair.attribution:
+                caption_text, caption_entities = _format_attribution(
+                    msg, caption_text, caption_entities
+                )
             send_kwargs = dict(
                 entity=pair.dest_peer,
                 file=file_bytes,
-                caption=msg.message or "",
+                caption=caption_text,
                 reply_to=reply_to,
-                formatting_entities=msg.entities,
+                formatting_entities=caption_entities,
             )
             if msg.voice:
                 send_kwargs["voice_note"] = True
@@ -392,11 +466,14 @@ async def _forward_one(
         text = msg.message or ""
         if not text:
             return
+        entities = msg.entities
+        if pair.attribution:
+            text, entities = _format_attribution(msg, text, entities)
         sent = await bot_client.send_message(
             entity=pair.dest_peer,
             message=text,
             reply_to=reply_to,
-            formatting_entities=msg.entities,
+            formatting_entities=entities,
         )
 
     pair.msg_id_map[msg.id] = sent.id

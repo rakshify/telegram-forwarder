@@ -13,6 +13,7 @@ It supports text, photos, videos, voice messages, video notes, GIFs, audio files
 - **Topic-aware.** Filter source by forum topic; route destination into a specific topic.
 - **Catch-up on restart.** Last-forwarded source message id is persisted per pair. On startup, missed messages are backfilled before the live listener attaches. First-ever run for a pair establishes a baseline at "now" — no full-history backfill.
 - **Reply preservation.** Replies in source become replies in destination, via a per-pair message-id map.
+- **Sender attribution (optional).** Prefix each forwarded message with the original sender's name and `@username` — useful when mirroring a chat where the destination audience won't otherwise know who said what.
 - **Config-file driven.** Express your entire forwarding topology in JSON; mix explicit `pairs` with `auto` blocks that mirror a community by topic title.
 - **Container-ready.** Persistent volume for sessions and state, env-var config, no host paths baked in.
 
@@ -236,6 +237,7 @@ The `./configs` directory is bind-mounted to `/app/configs` in the container by 
 | `user` | only if `-u` not on CLI | Short ID from `list-users`. |
 | `pairs` | one of `pairs`/`auto` is required | List of explicit ChatPair objects. |
 | `auto` | one of `pairs`/`auto` is required | List of community-mirror blocks (expand at startup). |
+| `attribution` | optional, default `false` | File-level default for whether to prefix forwarded messages with the source sender's name. Each entry below can override. |
 
 ### `pairs` — explicit, one-by-one
 
@@ -249,6 +251,7 @@ Each entry is exactly one ChatPair:
 | `dest_hash` | yes | Destination access_hash. `0` for basic groups; ignored at runtime since the bot resolves its own. |
 | `topic` | optional, default `0` | Source forum topic id. `0` = no filter. |
 | `dest_topic` | optional, default `0` | Destination forum topic id. `0` = main feed. |
+| `attribution` | optional, inherits file default | Override the file-level setting for this pair only. |
 
 ### `auto` — community-mirror form
 
@@ -260,16 +263,41 @@ Each entry describes a *pair of communities*. At startup the forwarder reads bot
 | `dest` / `dest_hash` | yes | Destination community. |
 | `include` | optional | Whitelist of titles. If present, only these titles are considered. |
 | `exclude` | optional | Blacklist of titles. Always applied after `include`. |
+| `attribution` | optional, inherits file default | Override the file-level setting for every ChatPair this block expands into. |
 
 `auto` matches by title. If you rename a topic in only one community, that pair stops firing until both sides are renamed (or moved into `pairs` with explicit ids). For rock-solid mappings, use `pairs`. For convenience after `clone-topics`, use `auto`.
 
+### Sender attribution
+
+When `attribution` is `true`, every forwarded message is prefixed with a bolded sender header:
+
+```
+Alex Doe (@alex_doe):
+
+The original message text follows here.
+```
+
+The sender's first name and last name are concatenated; the `@username` is appended in parentheses when present. Users with no first/last name fall back to just `@username`; users with neither show as `(unknown user)`. Anonymous channel posts use the channel title.
+
+For media (photo, video, document, voice, etc.) the prefix is added to the caption. Polls have no text body, so they're forwarded unchanged regardless of this setting.
+
+The `attribution` field can live at three places. The closest one wins:
+
+1. **On a `pairs` entry** or an `auto` block — applies to that entry only.
+2. **At the top level** of the config — applies as the default for every entry.
+3. **Nowhere** — defaults to `false` (original behavior, no prefix).
+
+This means you can set the file-level default to `true` and turn it off for specific pairs, or vice versa. See `configs/mixed.example.json` for a runnable example using both directions.
+
 ### Mixed example
 
-You can use `pairs` and `auto` together. Topology: 2 specific topics from community A, all of community E except General, and three plain supergroups B/C/D forwarded as-is:
+You can use `pairs` and `auto` together. Topology: 2 specific topics from community A, all of community E except General, and three plain supergroups B/C/D forwarded as-is. Attribution is enabled at the file level and overridden off for one block:
 
 ```json
 {
   "user": "aaaa11",
+
+  "attribution": true,
 
   "auto": [
     {
@@ -280,7 +308,8 @@ You can use `pairs` and `auto` together. Topology: 2 specific topics from commun
     {
       "source": "-1001000000005", "source_hash": 5555555555555555555,
       "dest":   "-1002000000005", "dest_hash": 0,
-      "exclude": ["General"]
+      "exclude": ["General"],
+      "attribution": false
     }
   ],
 
@@ -319,6 +348,7 @@ docker compose run --rm forwarder forward \
 | `-mh`  | `--mapped_chat_hash` | Destination access_hashes (kept for symmetry; bot resolves its own at runtime). |
 | `-tid` | `--topic_id` | *Optional.* Per-pair source topic ids inside a forum supergroup (1:1 with `-gid`). `0` = no filter. Once you pass `-tid` at all, every position needs a value (even `0`). |
 | `-mtid` | `--mapped_topic_id` | *Optional.* Per-pair destination topic ids (1:1 with `-mid`). `0` = main feed. Same all-or-nothing rule as `-tid`. |
+| `-attr` | `--attribution` | *Optional flag.* Prefix forwarded messages with the source sender's name and `@username`. Applies to all pairs in this invocation. For per-pair control, use a config file. |
 
 **Pairs are positional 1:1.** Position N across every list is one independent pair. Two `-gid`s with the same value are perfectly valid — they're two separate pairs that happen to share a source. So if community A has 2 topics you want, plain group B/C/D need no topics, and community E has 3 topics:
 

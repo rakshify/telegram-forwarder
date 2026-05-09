@@ -53,6 +53,16 @@ services:
   # Convention: configs/<short_id>.json on the host.
   # ============================================================
 
+  forwarder-aaaa11:
+    <<: *forwarder
+    container_name: tg-forwarder-aaaa11
+    command: ["forward", "-c", "/app/configs/aaaa11.json"]
+
+  # forwarder-bbbb22:
+  #   <<: *forwarder
+  #   container_name: tg-forwarder-bbbb22
+  #   command: ["forward", "-c", "/app/configs/bbbb22.json"]
+
   # forwarder-cccc33:
   #   <<: *forwarder
   #   container_name: tg-forwarder-cccc33

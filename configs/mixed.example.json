@@ -8,6 +8,13 @@
 
   "user": "REPLACE_WITH_SHORT_ID",
 
+  "_comment_attribution": [
+    "File-level default: every forwarded message gets a 'Sender Name (@username):'",
+    "header. Individual pairs and auto blocks can override with their own",
+    "'attribution' field — see overrides below."
+  ],
+  "attribution": true,
+
   "auto": [
     {
       "_comment": "Pick two specific topics from community A by title.",
@@ -18,12 +25,13 @@
       "include": ["Stock picks", "Macro & news"]
     },
     {
-      "_comment": "Mirror everything in community E except General.",
+      "_comment": "Mirror everything in community E except General. Override the file-level default — keep these messages clean (no attribution prefix).",
       "source": "-1001000000005",
       "source_hash": 5555555555555555555,
       "dest":   "-1002000000005",
       "dest_hash": 0,
-      "exclude": ["General"]
+      "exclude": ["General"],
+      "attribution": false
     }
   ],
 
@@ -42,6 +50,7 @@
       "dest_hash": 0
     },
     {
+      "_comment": "This one inherits attribution=true from the file default.",
       "source": "-1001000000004",
       "source_hash": 4444444444444444444,
       "dest":   "-1002000000004",
