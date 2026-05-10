@@ -13,6 +13,7 @@ It supports text, photos, videos, voice messages, video notes, GIFs, audio files
 - **Topic-aware.** Filter source by forum topic; route destination into a specific topic.
 - **Catch-up on restart.** Last-forwarded source message id is persisted per pair. On startup, missed messages are backfilled before the live listener attaches. First-ever run for a pair establishes a baseline at "now" — no full-history backfill.
 - **Reply preservation.** Replies in source become replies in destination, via a per-pair message-id map.
+- **Sender attribution (optional).** Prefix each forwarded message with the original sender's name and `@username` — useful when mirroring a chat where the destination audience won't otherwise know who said what.
 - **Config-file driven.** Express your entire forwarding topology in JSON; mix explicit `pairs` with `auto` blocks that mirror a community by topic title.
 - **Container-ready.** Persistent volume for sessions and state, env-var config, no host paths baked in.
 
@@ -115,7 +116,7 @@ You'll be prompted for:
 After success it prints something like:
 
 ```
-Logged in for Rakshit @rakshify (short_id=15e2b0, user_id=123456789).
+Logged in for Alex @alex_user (short_id=aaaa11, user_id=123456789).
 ```
 
 **Save the `short_id`** — that's how you'll reference this account in every other command. Run `login` again to add more accounts.
@@ -126,14 +127,14 @@ docker compose run --rm forwarder list-users
 
 ```
 SHORT_ID  USER_ID       PHONE             NAME                            SESSION_FILE
-15e2b0    123456789     +14155551234      Rakshit @rakshify               user_15e2b0.session
-8a9bcf    987654321     +919876543210     Other Account @other            user_8a9bcf.session
+aaaa11    123456789     +14155551234      Alex @alex_user                 user_aaaa11.session
+bbbb22    987654321     +919876543210     Another User @other_user        user_bbbb22.session
 ```
 
 To revoke a user's session and delete their local files:
 
 ```bash
-docker compose run --rm forwarder logout -u 15e2b0
+docker compose run --rm forwarder logout -u aaaa11
 ```
 
 ---
@@ -141,14 +142,14 @@ docker compose run --rm forwarder logout -u 15e2b0
 ## 4. Discover groups
 
 ```bash
-docker compose run --rm forwarder list-groups -u 15e2b0
+docker compose run --rm forwarder list-groups -u aaaa11
 ```
 
 ```
 TYPE       CHAT_ID           ACCESS_HASH           TITLE
-supergroup -1001234567890    1234567890123456789   My source group
-group      -9876543210       0                     My basic source group
-community  -1001969809629    7777777777777777777   Hyderabad Investing Enthusiasts
+supergroup -1009999900003    2222222222222222222   My source group
+group      -9999900001       0                     My basic source group
+community  -1009999900001    3333333333333333333   Example Community
 ```
 
 - **`supergroup`** — modern group, has an access_hash.
@@ -164,11 +165,11 @@ Telegram "communities" are forum-enabled supergroups: a single supergroup contai
 **List topics in a community:**
 
 ```bash
-docker compose run --rm forwarder list-topics -u 15e2b0 -gid -1001969809629
+docker compose run --rm forwarder list-topics -u aaaa11 -gid -1009999900001
 ```
 
 ```
-Topics in 'Hyderabad Investing Enthusiasts' (parent_chat_id=-1001969809629)
+Topics in 'Example Community' (parent_chat_id=-1009999900001)
 TOPIC_ID    CLOSED  TITLE
 1                   General
 17                  Stock picks
@@ -182,9 +183,9 @@ Topic id `1` is the always-present **General** topic.
 
 ```bash
 docker compose run --rm forwarder clone-topics \
-  -u 15e2b0 \
-  -gid -1001969809629 \
-  -mid -1005555555555
+  -u aaaa11 \
+  -gid -1009999900001 \
+  -mid -1008888800001
 ```
 
 After cloning, run `list-topics` on the destination to discover the new TOPIC_IDs (each forum has its own id space — the destination's "Stock picks" topic has a different id from the source's "Stock picks").
@@ -205,13 +206,13 @@ The `./configs` directory is bind-mounted to `/app/configs` in the container by 
 
 ```json
 {
-  "user": "15e2b0",
+  "user": "aaaa11",
 
   "pairs": [
     {
-      "source": "-1001234567890",
-      "source_hash": 9876543210987654321,
-      "dest":   "-1006666666666",
+      "source": "-1009999900003",
+      "source_hash": 1111111111111111111,
+      "dest":   "-1008888800002",
       "dest_hash": 0,
       "topic": 17,
       "dest_topic": 5
@@ -220,9 +221,9 @@ The `./configs` directory is bind-mounted to `/app/configs` in the container by 
 
   "auto": [
     {
-      "source": "-1001969809629",
-      "source_hash": 1234567890123456789,
-      "dest":   "-1005555555555",
+      "source": "-1009999900001",
+      "source_hash": 2222222222222222222,
+      "dest":   "-1008888800001",
       "dest_hash": 0,
       "include": ["Stock picks", "Macro & news"],
       "exclude": ["General"]
@@ -236,6 +237,7 @@ The `./configs` directory is bind-mounted to `/app/configs` in the container by 
 | `user` | only if `-u` not on CLI | Short ID from `list-users`. |
 | `pairs` | one of `pairs`/`auto` is required | List of explicit ChatPair objects. |
 | `auto` | one of `pairs`/`auto` is required | List of community-mirror blocks (expand at startup). |
+| `attribution` | optional, default `false` | File-level default for whether to prefix forwarded messages with the source sender's name. Each entry below can override. |
 
 ### `pairs` — explicit, one-by-one
 
@@ -243,12 +245,13 @@ Each entry is exactly one ChatPair:
 
 | Field | Required? | Meaning |
 |---|---|---|
-| `source` | yes | Source chat id (e.g. `-1001234567890` or `-9876543210` for basic groups). |
+| `source` | yes | Source chat id (e.g. `-1009999900003` or `-9999900001` for basic groups). |
 | `source_hash` | yes | Source access_hash. `0` for basic groups. |
 | `dest` | yes | Destination chat id. |
 | `dest_hash` | yes | Destination access_hash. `0` for basic groups; ignored at runtime since the bot resolves its own. |
 | `topic` | optional, default `0` | Source forum topic id. `0` = no filter. |
 | `dest_topic` | optional, default `0` | Destination forum topic id. `0` = main feed. |
+| `attribution` | optional, inherits file default | Override the file-level setting for this pair only. |
 
 ### `auto` — community-mirror form
 
@@ -260,16 +263,41 @@ Each entry describes a *pair of communities*. At startup the forwarder reads bot
 | `dest` / `dest_hash` | yes | Destination community. |
 | `include` | optional | Whitelist of titles. If present, only these titles are considered. |
 | `exclude` | optional | Blacklist of titles. Always applied after `include`. |
+| `attribution` | optional, inherits file default | Override the file-level setting for every ChatPair this block expands into. |
 
 `auto` matches by title. If you rename a topic in only one community, that pair stops firing until both sides are renamed (or moved into `pairs` with explicit ids). For rock-solid mappings, use `pairs`. For convenience after `clone-topics`, use `auto`.
 
+### Sender attribution
+
+When `attribution` is `true`, every forwarded message is prefixed with a bolded sender header:
+
+```
+Alex Doe (@alex_doe):
+
+The original message text follows here.
+```
+
+The sender's first name and last name are concatenated; the `@username` is appended in parentheses when present. Users with no first/last name fall back to just `@username`; users with neither show as `(unknown user)`. Anonymous channel posts use the channel title.
+
+For media (photo, video, document, voice, etc.) the prefix is added to the caption. Polls have no text body, so they're forwarded unchanged regardless of this setting.
+
+The `attribution` field can live at three places. The closest one wins:
+
+1. **On a `pairs` entry** or an `auto` block — applies to that entry only.
+2. **At the top level** of the config — applies as the default for every entry.
+3. **Nowhere** — defaults to `false` (original behavior, no prefix).
+
+This means you can set the file-level default to `true` and turn it off for specific pairs, or vice versa. See `configs/mixed.example.json` for a runnable example using both directions.
+
 ### Mixed example
 
-You can use `pairs` and `auto` together. Topology: 2 specific topics from community A, all of community E except General, and three plain supergroups B/C/D forwarded as-is:
+You can use `pairs` and `auto` together. Topology: 2 specific topics from community A, all of community E except General, and three plain supergroups B/C/D forwarded as-is. Attribution is enabled at the file level and overridden off for one block:
 
 ```json
 {
-  "user": "15e2b0",
+  "user": "aaaa11",
+
+  "attribution": true,
 
   "auto": [
     {
@@ -280,7 +308,8 @@ You can use `pairs` and `auto` together. Topology: 2 specific topics from commun
     {
       "source": "-1001000000005", "source_hash": 5555555555555555555,
       "dest":   "-1002000000005", "dest_hash": 0,
-      "exclude": ["General"]
+      "exclude": ["General"],
+      "attribution": false
     }
   ],
 
@@ -302,10 +331,10 @@ Same thing, just without the config file. Useful for quick one-offs:
 
 ```bash
 docker compose run --rm forwarder forward \
-  -u 15e2b0 \
-  -gid -1001234567890 -1009876543210 \
-  -gh  1234567890123456789 9876543210987654321 \
-  -mid -1005555555555 -1006666666666 \
+  -u aaaa11 \
+  -gid -1009999900003 -1009999900002 \
+  -gh  2222222222222222222 1111111111111111111 \
+  -mid -1008888800001 -1008888800002 \
   -mh  0 0
 ```
 
@@ -319,6 +348,7 @@ docker compose run --rm forwarder forward \
 | `-mh`  | `--mapped_chat_hash` | Destination access_hashes (kept for symmetry; bot resolves its own at runtime). |
 | `-tid` | `--topic_id` | *Optional.* Per-pair source topic ids inside a forum supergroup (1:1 with `-gid`). `0` = no filter. Once you pass `-tid` at all, every position needs a value (even `0`). |
 | `-mtid` | `--mapped_topic_id` | *Optional.* Per-pair destination topic ids (1:1 with `-mid`). `0` = main feed. Same all-or-nothing rule as `-tid`. |
+| `-attr` | `--attribution` | *Optional flag.* Prefix forwarded messages with the source sender's name and `@username`. Applies to all pairs in this invocation. For per-pair control, use a config file. |
 
 **Pairs are positional 1:1.** Position N across every list is one independent pair. Two `-gid`s with the same value are perfectly valid — they're two separate pairs that happen to share a source. So if community A has 2 topics you want, plain group B/C/D need no topics, and community E has 3 topics:
 
@@ -385,15 +415,15 @@ For more than one or two users, `forwarder.sh` runs one container per user from 
 docker compose build
 
 # One-time per user: log in, then save their config
-docker compose run --rm forwarder login                    # prints short_id, e.g. 15e2b0
-nano configs/15e2b0.json                                   # define their pairs
+docker compose run --rm forwarder login                    # prints short_id, e.g. aaaa11
+nano configs/aaaa11.json                                   # define their pairs
 
 # Start, stop, tail logs, list:
-./forwarder.sh start 15e2b0
-./forwarder.sh logs  15e2b0                                # Ctrl+C exits the tail
+./forwarder.sh start aaaa11
+./forwarder.sh logs  aaaa11                                # Ctrl+C exits the tail
 ./forwarder.sh ps                                          # show all forwarder containers
-./forwarder.sh restart 15e2b0
-./forwarder.sh stop 15e2b0
+./forwarder.sh restart aaaa11
+./forwarder.sh stop aaaa11
 
 # Bulk operations
 ./forwarder.sh start-all                                   # starts every configs/<id>.json
@@ -411,16 +441,16 @@ Each container is named `tg-forwarder-<short_id>`, has `--restart unless-stopped
 docker compose build
 
 # One-time per user: log in
-docker compose run --rm forwarder login                    # prints short_id, e.g. 15e2b0
-nano configs/15e2b0.json
+docker compose run --rm forwarder login                    # prints short_id, e.g. aaaa11
+nano configs/aaaa11.json
 
 # Add a service block to docker-compose.users.yml for each user, then:
 docker compose -f docker-compose.users.yml up -d
 
 # Day-to-day
 docker compose -f docker-compose.users.yml ps
-docker compose -f docker-compose.users.yml logs -f forwarder-15e2b0
-docker compose -f docker-compose.users.yml restart forwarder-15e2b0
+docker compose -f docker-compose.users.yml logs -f forwarder-aaaa11
+docker compose -f docker-compose.users.yml restart forwarder-aaaa11
 docker compose -f docker-compose.users.yml down
 ```
 
@@ -435,10 +465,10 @@ After that, `docker compose up -d` brings everything up (including the multi-use
 A new user is one block:
 
 ```yaml
-  forwarder-8a9bcf:
+  forwarder-bbbb22:
     <<: *forwarder
-    container_name: tg-forwarder-8a9bcf
-    command: ["forward", "-c", "/app/configs/8a9bcf.json"]
+    container_name: tg-forwarder-bbbb22
+    command: ["forward", "-c", "/app/configs/bbbb22.json"]
 ```
 
 The `<<: *forwarder` line is a YAML anchor reference that expands the shared image/env_file/volumes/restart fields at file-load time. It's a pure YAML feature, not a compose feature. Then `docker compose -f docker-compose.users.yml up -d` — compose reconciles, starting the new one without touching the others.
@@ -458,7 +488,7 @@ The image is a single-process container with stateful sessions on disk. Anywhere
 ```powershell
 # Quick provision (full guide in deploy/README.md)
 cd deploy
-.\deploy-aws.ps1 -OutputFolder C:\Users\you\tg-forwarder-aws
+.\deploy-aws.ps1 -OutputFolder C:\Users\me\tg-forwarder-aws
 ```
 
 **AWS ECS (Fargate):** push the image to ECR, attach an EFS volume mounted at `/data/sessions`. Don't run more than one task pointed at the same EFS — the SQLite session files only support a single writer.

@@ -81,6 +81,9 @@ async def load_config(
 
     pairs: List[ChatPair] = []
 
+    # File-level default for attribution. Each entry can override.
+    default_attribution = bool(cfg.get("attribution", False))
+
     # 1) Explicit per-pair entries
     for i, entry in enumerate(cfg.get("pairs") or []):
         try:
@@ -91,6 +94,7 @@ async def load_config(
                 dest_hash=_normalize_int(entry["dest_hash"]),
                 topic_id=_normalize_int(entry.get("topic", 0)),
                 dest_topic_id=_normalize_int(entry.get("dest_topic", 0)),
+                attribution=bool(entry.get("attribution", default_attribution)),
             ))
         except KeyError as e:
             raise SystemExit(f"{path}: pairs[{i}] missing key {e}")
@@ -98,7 +102,9 @@ async def load_config(
     # 2) Auto blocks — expand to one ChatPair per topic by matching titles
     auto_blocks = cfg.get("auto") or []
     if auto_blocks:
-        pairs.extend(await _expand_auto_blocks(short_id, auto_blocks, path))
+        pairs.extend(
+            await _expand_auto_blocks(short_id, auto_blocks, path, default_attribution)
+        )
 
     if not pairs:
         raise SystemExit(f"{path}: no pairs defined (need 'pairs' or 'auto').")
@@ -107,7 +113,7 @@ async def load_config(
 
 
 async def _expand_auto_blocks(
-    short_id: str, blocks: list, path: Path
+    short_id: str, blocks: list, path: Path, default_attribution: bool = False
 ) -> List[ChatPair]:
     """Resolve each auto block into one ChatPair per matching topic title."""
     config.validate(require_bot=False)
@@ -159,6 +165,7 @@ async def _expand_auto_blocks(
 
             include = set(block.get("include") or [])
             exclude = set(block.get("exclude") or [])
+            block_attribution = bool(block.get("attribution", default_attribution))
 
             src_marked = int(f"-100{parse_chat_id(src_id_raw)}")
             dst_marked = int(f"-100{parse_chat_id(dst_id_raw)}")
@@ -207,6 +214,7 @@ async def _expand_auto_blocks(
                     dest_hash=dst_hash,
                     topic_id=topic.id,
                     dest_topic_id=dest_topic_id,
+                    attribution=block_attribution,
                 ))
                 print(f"  pair: topic {topic.id} ({topic.title!r}) "
                       f"-> dest topic {dest_topic_id}")

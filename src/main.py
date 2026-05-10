@@ -131,6 +131,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional per-pair destination topic ids (1:1 with -mid). Use 0 to post in "
              "the main feed. Omit entirely to disable destination topic routing for all pairs.",
     )
+    p_forward.add_argument(
+        "-attr", "--attribution",
+        action="store_true",
+        help="Prefix each forwarded message with the source sender's name (and "
+             "@username, when present). Applies to all pairs in this invocation. "
+             "For per-pair control, use a config file with `-c`.",
+    )
 
     return parser
 
@@ -172,6 +179,7 @@ def _build_pairs(args: argparse.Namespace) -> List[fwd.ChatPair]:
             dest_hash=int(mh),
             topic_id=int(tid),
             dest_topic_id=int(mtid),
+            attribution=bool(getattr(args, "attribution", False)),
         )
         for gid, gh, mid, mh, tid, mtid in zip(gids, ghs, mids, mhs, tids, mtids)
     ]

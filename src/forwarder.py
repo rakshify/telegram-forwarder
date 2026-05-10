@@ -31,6 +31,8 @@ from telethon.tl.types import (
     DocumentAttributeFilename,
     MessageMediaPoll,
     MessageMediaWebPage,
+    MessageEntityBold,
+    User,
 )
 
 from . import config, state, users
@@ -50,6 +52,10 @@ class ChatPair:
     `dest_topic_id` of 0 means "post in the destination's main feed". Any
     other value posts inside that destination topic (the destination must be
     a forum-enabled supergroup, and the topic must already exist).
+
+    `attribution` controls whether each forwarded message is prefixed with
+    the source sender's name (and @username, when present). Off by default
+    so the original behavior is unchanged.
     """
     source_id: int
     source_hash: int
@@ -57,6 +63,7 @@ class ChatPair:
     dest_hash: int
     topic_id: int = 0
     dest_topic_id: int = 0
+    attribution: bool = False
     source_peer: Optional[object] = None
     dest_peer: Optional[object] = None
     msg_id_map: Dict[int, int] = field(default_factory=dict)
@@ -85,7 +92,7 @@ async def forward_pairs(short_id: str, pairs: List[ChatPair]) -> None:
         str(record.session_base), config.api_id_int(), config.TG_API_HASH
     )
     bot_client = TelegramClient(
-        str(config.BOT_SESSION_PATH), config.api_id_int(), config.TG_API_HASH
+        str(config.bot_session_path(short_id)), config.api_id_int(), config.TG_API_HASH
     )
 
     await user_client.connect()
@@ -308,6 +315,67 @@ def _register_handler(
                   f"error on msg {mid}: {e}")
 
 
+# ------------------------------------------------------------------ attribution
+
+def _sender_display(sender) -> str:
+    """Render a sender as 'First Last (@username)' / 'First (@username)' /
+    'First Last' / 'First' / '(unknown user)' depending on what's available.
+    """
+    if sender is None:
+        return "(unknown user)"
+    if not isinstance(sender, User):
+        # Channel posts, anonymous admin posts, etc. — use the chat title.
+        title = getattr(sender, "title", None)
+        return title or "(unknown sender)"
+
+    parts = [p for p in (sender.first_name, sender.last_name) if p]
+    name = " ".join(parts) if parts else None
+
+    if name and sender.username:
+        return f"{name} (@{sender.username})"
+    if name:
+        return name
+    if sender.username:
+        return f"@{sender.username}"
+    return "(unknown user)"
+
+
+def _format_attribution(msg: Message, original_text: str, original_entities):
+    """Return (text, entities) with a bolded sender prefix prepended.
+
+    Used when pair.attribution is True. The prefix renders as:
+
+        Alex Doe (@alex_doe):
+        <blank line>
+        <original text>
+
+    All of the original entities (bold/italic/links/etc.) are preserved by
+    cloning each one with a shifted offset. We copy rather than mutate so
+    re-using the same source message in another pair stays safe.
+    """
+    import copy
+
+    sender = msg.sender                # populated by Telethon when the message arrives
+    display = _sender_display(sender)
+    prefix = f"{display}:\n\n"
+    new_text = prefix + (original_text or "")
+
+    # Bold the name portion only — everything up to (but not including) the colon.
+    name_len = len(display)
+    new_entities = [MessageEntityBold(offset=0, length=name_len)]
+
+    # Shift original entities by the prefix length so they still cover the
+    # right slice of new_text. copy.copy is enough — entities are flat objects.
+    if original_entities:
+        prefix_len = len(prefix)
+        for ent in original_entities:
+            shifted = copy.copy(ent)
+            shifted.offset = ent.offset + prefix_len
+            new_entities.append(shifted)
+
+    return new_text, new_entities
+
+
 # ------------------------------------------------------------------ the actual send
 
 async def _forward_one(
@@ -352,51 +420,102 @@ async def _forward_one(
         )
 
     # 2) Media (photo, video, audio, voice, video-note, sticker, gif, document).
+    #    Download to a tempfile (with the right extension) so Telethon's
+    #    server-side type detection works correctly, then re-upload via the
+    #    bot. Passing raw bytes via file=<bytes> leaves Telegram unable to
+    #    classify the upload and you end up with "tap to download" tiles
+    #    instead of inline previews.
     elif msg.media and not isinstance(msg.media, MessageMediaWebPage):
-        file_bytes = await msg.download_media(file=bytes)
-        if file_bytes:
-            send_kwargs = dict(
-                entity=pair.dest_peer,
-                file=file_bytes,
-                caption=msg.message or "",
-                reply_to=reply_to,
-                formatting_entities=msg.entities,
-            )
-            if msg.voice:
-                send_kwargs["voice_note"] = True
-            elif msg.video_note:
-                send_kwargs["video_note"] = True
-            elif msg.gif:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="animation.mp4")]
-            elif msg.photo:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="image.png")]
-            elif msg.sticker:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="sticker.webp")]
-            elif msg.video:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="video.mp4")]
-            elif msg.audio:
-                send_kwargs["attributes"] = [DocumentAttributeFilename(file_name="audio.mp3")]
-            elif msg.document:
-                fname = next(
-                    (a.file_name for a in msg.document.attributes
-                     if isinstance(a, DocumentAttributeFilename)),
-                    None,
-                )
-                if fname:
-                    send_kwargs["attributes"] = [DocumentAttributeFilename(file_name=fname)]
+        import os
+        import tempfile
 
-            sent = await bot_client.send_file(**send_kwargs)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # download_media with a directory path lets Telethon pick the
+            # right filename + extension for us based on the media type.
+            downloaded = await msg.download_media(file=tmpdir)
+            if not downloaded:
+                pass  # nothing to forward (e.g. unsupported media type)
+            else:
+                caption_text = msg.message or ""
+                caption_entities = msg.entities
+                if pair.attribution:
+                    caption_text, caption_entities = _format_attribution(
+                        msg, caption_text, caption_entities
+                    )
+                send_kwargs = dict(
+                    entity=pair.dest_peer,
+                    file=downloaded,    # path with proper extension
+                    caption=caption_text,
+                    reply_to=reply_to,
+                    formatting_entities=caption_entities,
+                )
+
+                if msg.voice:
+                    # Voice notes: small audio bubble with waveform + play button.
+                    send_kwargs["voice_note"] = True
+                elif msg.video_note:
+                    # Round video bubble.
+                    send_kwargs["video_note"] = True
+                elif msg.photo:
+                    # Inline photo with preview. The .jpg extension on the
+                    # downloaded path lets Telethon route this through the
+                    # photo upload path rather than treating it as a document.
+                    send_kwargs["force_document"] = False
+                elif msg.gif:
+                    # Animation — mp4 bytes recognized as a GIF when video=True
+                    # and force_document=False is set.
+                    send_kwargs["video"] = True
+                    send_kwargs["force_document"] = False
+                elif msg.video:
+                    # Inline video with thumbnail + scrubber. supports_streaming
+                    # lets Telegram start playback before download finishes.
+                    send_kwargs["video"] = True
+                    send_kwargs["supports_streaming"] = True
+                    send_kwargs["force_document"] = False
+                elif msg.audio:
+                    # Music-style audio player (rather than a generic file tile).
+                    send_kwargs["force_document"] = False
+                    # Preserve original title/performer/duration if present.
+                    from telethon.tl.types import DocumentAttributeAudio
+                    audio_attr = next(
+                        (a for a in msg.document.attributes
+                         if isinstance(a, DocumentAttributeAudio)),
+                        None,
+                    )
+                    if audio_attr is not None:
+                        send_kwargs["attributes"] = [audio_attr]
+                elif msg.sticker:
+                    # Bots have limited sticker-send capability; fall back to
+                    # webp file. Known limitation.
+                    pass  # filename from download already ends in .webp
+                elif msg.document:
+                    # Generic document — preserve original filename so the
+                    # destination shows the right extension and icon.
+                    fname = next(
+                        (a.file_name for a in msg.document.attributes
+                         if isinstance(a, DocumentAttributeFilename)),
+                        None,
+                    )
+                    if fname:
+                        send_kwargs["attributes"] = [
+                            DocumentAttributeFilename(file_name=fname)
+                        ]
+
+                sent = await bot_client.send_file(**send_kwargs)
 
     # 3) Plain text (covers text-only messages and text-with-link-preview).
     if sent is None:
         text = msg.message or ""
         if not text:
             return
+        entities = msg.entities
+        if pair.attribution:
+            text, entities = _format_attribution(msg, text, entities)
         sent = await bot_client.send_message(
             entity=pair.dest_peer,
             message=text,
             reply_to=reply_to,
-            formatting_entities=msg.entities,
+            formatting_entities=entities,
         )
 
     pair.msg_id_map[msg.id] = sent.id
