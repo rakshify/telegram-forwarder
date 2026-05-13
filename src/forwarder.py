@@ -88,12 +88,8 @@ async def forward_pairs(short_id: str, pairs: List[ChatPair]) -> None:
     config.validate(require_bot=True)
     record = users.get_user(short_id)
 
-    user_client = TelegramClient(
-        str(record.session_base), config.api_id_int(), config.TG_API_HASH
-    )
-    bot_client = TelegramClient(
-        str(config.bot_session_path(short_id)), config.api_id_int(), config.TG_API_HASH
-    )
+    user_client = config.make_client(record.session_base)
+    bot_client = config.make_client(config.bot_session_path(short_id))
 
     await user_client.connect()
     if not await user_client.is_user_authorized():

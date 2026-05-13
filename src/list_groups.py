@@ -11,9 +11,7 @@ async def list_groups(short_id: str) -> None:
     config.validate(require_bot=False)
     record = users.get_user(short_id)
 
-    client = TelegramClient(
-        str(record.session_base), config.api_id_int(), config.TG_API_HASH
-    )
+    client = config.make_client(record.session_base)
     await client.connect()
 
     if not await client.is_user_authorized():
@@ -88,9 +86,7 @@ async def list_topics(short_id: str, parent_id_str: str) -> None:
     config.validate(require_bot=False)
     record = users.get_user(short_id)
 
-    client = TelegramClient(
-        str(record.session_base), config.api_id_int(), config.TG_API_HASH
-    )
+    client = config.make_client(record.session_base)
     await client.connect()
 
     if not await client.is_user_authorized():
@@ -185,9 +181,7 @@ async def clone_topics(short_id: str, src_id_str: str, dst_id_str: str) -> None:
     config.validate(require_bot=False)
     record = users.get_user(short_id)
 
-    client = TelegramClient(
-        str(record.session_base), config.api_id_int(), config.TG_API_HASH
-    )
+    client = config.make_client(record.session_base)
     await client.connect()
     if not await client.is_user_authorized():
         print(f"User {short_id} not authorized.")
