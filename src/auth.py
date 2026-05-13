@@ -30,7 +30,7 @@ async def login() -> None:
     # Login under a temp session — we can't pick the final filename until we
     # know the user's id (only available via get_me() after sign_in).
     tmp_base = config.SESSION_DIR / f"_tmp_login_{secrets.token_hex(4)}"
-    client = TelegramClient(str(tmp_base), config.api_id_int(), config.TG_API_HASH)
+    client = config.make_client(tmp_base)
     await client.connect()
 
     try:
@@ -83,9 +83,7 @@ async def logout(short_id: str) -> None:
     config.validate(require_bot=False)
     record = users.get_user(short_id)
 
-    client = TelegramClient(
-        str(record.session_base), config.api_id_int(), config.TG_API_HASH
-    )
+    client = config.make_client(record.session_base)
     await client.connect()
     if await client.is_user_authorized():
         try:

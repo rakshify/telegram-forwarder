@@ -88,12 +88,8 @@ async def forward_pairs(short_id: str, pairs: List[ChatPair]) -> None:
     config.validate(require_bot=True)
     record = users.get_user(short_id)
 
-    user_client = TelegramClient(
-        str(record.session_base), config.api_id_int(), config.TG_API_HASH
-    )
-    bot_client = TelegramClient(
-        str(config.bot_session_path(short_id)), config.api_id_int(), config.TG_API_HASH
-    )
+    user_client = config.make_client(record.session_base)
+    bot_client = config.make_client(config.bot_session_path(short_id))
 
     await user_client.connect()
     if not await user_client.is_user_authorized():
@@ -130,8 +126,18 @@ async def forward_pairs(short_id: str, pairs: List[ChatPair]) -> None:
             prime=lambda: _prime(bot_client, bot_primed),
         )
 
+    # Even when access_hashes are supplied (so _resolve_peer didn't need to
+    # call get_entity), iter_messages / get_messages still hit the session
+    # cache for the underlying GetHistoryRequest. Newly-added chats that the
+    # user account has never opened on this session will fail with
+    # ChannelInvalidError. Prime the user session unconditionally so every
+    # source chat is known before catchup runs.
+    if not user_primed["done"]:
+        print("  priming user session cache for catchup...")
+        await _prime(user_client, user_primed)
+
     # Catch up missed messages for every pair before going live
-    forward_state = state.load_state()
+    forward_state = state.load_state(short_id)
     for pair in pairs:
         await _catchup(user_client, bot_client, pair, short_id, forward_state)
 
@@ -241,7 +247,7 @@ async def _catchup(
         latest_msgs = await user_client.get_messages(pair.source_peer, **latest_kwargs)
         baseline = latest_msgs[0].id if latest_msgs else 0
         forward_state[skey] = baseline
-        state.save_state(forward_state)
+        state.save_state(short_id, forward_state)
         scope = f"topic {pair.topic_id}" if pair.topic_id else "whole chat"
         print(f"[{pair.source_id}{_topic_label(pair)} -> {pair.dest_id}] "
               f"no prior state ({scope}) — baselined at message id {baseline}")
@@ -267,7 +273,7 @@ async def _catchup(
                   f"stopping catchup for this pair, will retry next run")
             return
         forward_state[skey] = m.id
-        state.save_state(forward_state)
+        state.save_state(short_id, forward_state)
 
 
 def _topic_label(pair: ChatPair) -> str:
@@ -308,7 +314,7 @@ def _register_handler(
                 return
             await _forward_one(bot_client, pair, msg)
             forward_state[skey] = msg.id
-            state.save_state(forward_state)
+            state.save_state(short_id, forward_state)
         except Exception as e:
             mid = getattr(msg, "id", "?")
             print(f"[{pair.source_id}{_topic_label(pair)} -> {pair.dest_id}] "

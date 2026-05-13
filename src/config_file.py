@@ -121,9 +121,7 @@ async def _expand_auto_blocks(
 
     GetForumTopicsRequest, uses_peer_kw = _import_get_topics_request()
 
-    client = TelegramClient(
-        str(record.session_base), config.api_id_int(), config.TG_API_HASH
-    )
+    client = config.make_client(record.session_base)
     await client.connect()
     if not await client.is_user_authorized():
         await client.disconnect()
