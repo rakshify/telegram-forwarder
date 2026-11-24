@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse to push commits that carry private files or values (see check_private.py).
+# git passes the refs being pushed on stdin.
+exec python3 "$(git rev-parse --show-toplevel)/.githooks/check_private.py" --push

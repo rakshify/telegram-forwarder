@@ -1,0 +1,75 @@
+# Static per-user compose layout — alternative to forwarder.sh.
+#
+# Use this file when you want compose to be the single source of truth
+# for which forwarders should be running. Each user is a service; adding
+# a user means appending a 4-line block; `docker compose up -d` reconciles
+# state. See README section 8 for the trade-off vs the dynamic script.
+#
+# How to use:
+#   1. Build the image (compose still owns the build):
+#        docker compose build
+#      (yes, plain `docker compose build` — it reads ./docker-compose.yml,
+#      which has the `build: .` directive. This file reuses that image.)
+#
+#   2. For one-off operations (login, list-users, etc.) keep using the
+#      base file:
+#        docker compose run --rm forwarder login
+#
+#   3. Edit the per-user services below for your real users and configs.
+#      Each service references configs/<short_id>.json by convention.
+#
+#   4. Bring everything up:
+#        docker compose -f docker-compose.users.yml up -d
+#        docker compose -f docker-compose.users.yml logs -f forwarder-aaaa11
+#        docker compose -f docker-compose.users.yml restart forwarder-aaaa11
+#        docker compose -f docker-compose.users.yml down
+#
+# Tip: `export COMPOSE_FILE=docker-compose.yml:docker-compose.users.yml`
+# in your shell to make `docker compose` commands transparently use both.
+#
+# All services share /data/sessions, so users.json stays consistent and
+# `login` is a one-time-per-user operation regardless of how many forwarders
+# are defined.
+#
+# ----------------------------------------------------------------------------
+# About the YAML `&forwarder` anchor below: it's a YAML-level shorthand.
+# `<<: *forwarder` in a service block expands at file-load time to all the
+# fields under the anchor, so each per-user service gets the same image,
+# env_file, volumes, and restart policy. This keeps you from having to
+# repeat them per service. It is a YAML feature, not a compose feature —
+# every modern compose version handles it natively.
+
+x-forwarder: &forwarder
+  image: telegram-forwarder:latest
+  env_file: .env
+  volumes:
+    - ./data/sessions:/data/sessions
+    - ./configs:/app/configs:ro
+  restart: unless-stopped
+
+services:
+  # ============================================================
+  # Per-user services. Add one block per user.
+  # Convention: configs/<short_id>.json on the host.
+  # ============================================================
+
+  forwarder-aaaa11:
+    <<: *forwarder
+    container_name: tg-forwarder-aaaa11
+    command: ["forward", "-c", "/app/configs/aaaa11.json"]
+
+  # forwarder-bbbb22:
+  #   <<: *forwarder
+  #   container_name: tg-forwarder-bbbb22
+  #   command: ["forward", "-c", "/app/configs/bbbb22.json"]
+
+  # forwarder-cccc33:
+  #   <<: *forwarder
+  #   container_name: tg-forwarder-cccc33
+  #   command: ["forward", "-c", "/app/configs/cccc33.json"]
+
+networks:
+  # The network docker-compose.yml uses, so these services can reach
+  # signal-api (Signal destinations, README §12) by name.
+  default:
+    name: telegram-forwarder

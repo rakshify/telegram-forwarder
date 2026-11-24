@@ -1,0 +1,78 @@
+services:
+  # Single-service setup. Used for:
+  #   - building the image: `docker compose build`
+  #   - one-off commands: `docker compose run --rm forwarder <subcommand>`
+  #   - running ONE forwarder long-term: edit `command` and `docker compose up -d`
+  #
+  # For running MANY users at once (one container per user), don't try to add
+  # services here — use `forwarder.sh` instead. It runs `docker run` directly
+  # against the image this file builds, so you don't need a service definition
+  # per user. See README section 8.
+  forwarder:
+    build: .
+    image: telegram-forwarder:latest
+    container_name: telegram-forwarder
+    env_file: .env
+    volumes:
+      # Sessions, users.json, forward_state.json — survive container restarts.
+      - ./data/sessions:/data/sessions
+      # Forward configs. Drop *.json files into ./configs and reference them
+      # from inside the container at /app/configs/<name>.json.
+      - ./configs:/app/configs:ro
+    stdin_open: true   # keep STDIN open for interactive login
+    tty: true          # allocate a TTY for OTP / 2FA prompts
+    restart: unless-stopped
+
+    # `command` controls what runs when you do `docker compose up`.
+    # For one-off operations, use `docker compose run --rm forwarder <subcommand>`:
+    #   docker compose run --rm forwarder login
+    #   docker compose run --rm forwarder list-users
+    #   docker compose run --rm forwarder logout      -u <short_id>
+    #   docker compose run --rm forwarder list-groups -u <short_id>
+    #   docker compose run --rm forwarder list-topics -u <short_id> -gid <community_id>
+    #   docker compose run --rm forwarder clone-topics -u <short_id> -gid <src_id> -mid <dst_id>
+    #
+    # WhatsApp bridge (README section 12):
+    #   docker compose run --rm forwarder wa-link --phone +<country><number>
+    #   docker compose run --rm forwarder wa-list-accounts
+    #   docker compose run --rm forwarder wa-list-groups -a <wa_short_id>   # bridge must be stopped
+    #   docker compose run --rm forwarder wa-forward -c /app/configs/wa-<wa_short_id>.json --dry-run
+    #
+    # For long-running forwarding of a SINGLE user, replace the `command` below
+    # with your real config file path. Then `docker compose up -d`.
+    #
+    # Example:
+    #   command: ["forward", "-c", "/app/configs/15e2b0.json"]
+    #
+    # For MULTIPLE users running concurrently, use ./forwarder.sh — it spawns
+    # one container per user from this same image without needing per-user
+    # service definitions in this file.
+    command: ["--help"]
+
+  # Signal destinations for the WhatsApp bridge (README §12, "Signal
+  # destinations"). Off unless asked for:
+  #   docker compose --profile signal up -d signal-api
+  # Bridges reach it as http://signal-api:8080 (SIGNAL_API_URL) over the
+  # telegram-forwarder network below. The port is published on 127.0.0.1
+  # only, for linking the Signal account from this machine: anyone who can
+  # reach the API can send as that account.
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: signal-api
+    profiles: ["signal"]
+    restart: unless-stopped
+    environment:
+      # One long-running signal-cli: quick sends, and it keeps receiving in
+      # the background, which keeps group membership current.
+      - MODE=json-rpc
+    volumes:
+      # The Signal account's keys. Whoever has this folder can use the account.
+      - ./data/signal:/home/.local/share/signal-cli
+    ports:
+      - "127.0.0.1:8080:8080"
+
+networks:
+  # A fixed name, so containers started by forwarder.sh (plain `docker run`)
+  # can join it and reach signal-api by name.
+  default:
+    name: telegram-forwarder

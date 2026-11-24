@@ -1,0 +1,32 @@
+{
+  "_comment_top": "WhatsApp -> Telegram and Signal. Save as configs/wa-<short_id>.json and start with ./forwarder.sh start wa-<short_id>.",
+  "_comment_account": "short_id from `wa-list-accounts` (printed by wa-link).",
+
+  "platform": "whatsapp",
+  "account": "REPLACE_WITH_WA_SHORT_ID",
+
+  "_comment_attribution": "File-wide default: prefix messages with the sender's WhatsApp profile name. Pairs can override.",
+  "attribution": true,
+
+  "_comment_alerts": "Optional: Telegram user id the bot DMs when the bridge needs attention. Press Start on the bot once.",
+  "alerts": 0,
+
+  "pairs": [
+    {
+      "_comment": "A WhatsApp group (id from ./forwarder.sh wa-groups <short_id>) -> a Telegram supergroup and a Signal group. Signal group ids come from signal-cli-rest-api's /v1/groups/<SIGNAL_SENDER> (README §12, Signal destinations); a +phone number sends to a 1:1 chat.",
+      "source": "120363012345678901@g.us",
+      "dests": [
+        {"dest": "-1006666666666", "dest_hash": 1234567890123456789},
+        {"dest_platform": "signal", "dest": "group.REPLACE_WITH_SIGNAL_GROUP_ID"}
+      ]
+    },
+    {
+      "_comment": "A 1:1 WhatsApp chat -> a topic of a Telegram forum supergroup, without sender names.",
+      "source": "+919876543210",
+      "dest": "-1007777777777",
+      "dest_hash": 9876543210987654321,
+      "dest_topic": 12,
+      "attribution": false
+    }
+  ]
+}

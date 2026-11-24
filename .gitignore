@@ -1,0 +1,39 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# secrets: every env file except the template
+.env
+.env.*
+!.env.example
+env
+*.env
+
+# local session storage (also matches the docker-compose volume mount)
+data/
+sessions/
+*.session
+*.session-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# sample docker compose
+docker-compose.sample.yml
+
+# real configs carry chat ids and access hashes: keep only the examples and the README
+configs/*
+!configs/README.md
+!configs/*.example.json
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# useful scripts
+generate_code.py

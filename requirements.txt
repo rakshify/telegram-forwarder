@@ -1,0 +1,8 @@
+telethon>=1.36.0
+python-dotenv>=1.0.0
+cryptg>=0.4.0
+# WhatsApp source (src/adapters/whatsapp). Pinned exactly: neonize ships
+# breaking releases often, and every call into it lives in
+# src/adapters/whatsapp/client.py. To upgrade, bump this pin, rebuild, and
+# re-run the tests.
+neonize==0.12.4
